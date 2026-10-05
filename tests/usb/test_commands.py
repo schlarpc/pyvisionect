@@ -233,9 +233,11 @@ def test_wifi_ssid_set_is_hidden_from_help_but_present() -> None:
     Why it matters: it takes the **SSID alone**, with no PSK, where
     ``wifi_conf_set`` takes four whitespace-separated arguments. That makes it
     the only candidate route to an SSID containing a space, and it needs no
-    credentials to try. Whether the console's parser actually hands it a spaced
-    SSID is still unverified -- ``OPEN-QUESTIONS.md`` A2 -- so this test claims
-    the command's existence and its arity, and nothing about spaces working.
+    credentials to try. It has since been tried, and the space survives: the
+    command takes the rest of the line verbatim (``OPEN-QUESTIONS.md`` A2).
+    This test still claims only the command's existence and its arity -- the
+    behaviour is pinned in ``test_provisioning.py``, where the code that emits
+    it lives.
     """
     assert "wifi_ssid_set" in COMMANDS, "present on 7.4.4407"
     assert "wifi_ssid_set" in HIDDEN_IN_7_4_4407
@@ -533,7 +535,9 @@ def test_a_hidden_command_is_still_refused_after_a_refresh() -> None:
     The local gate is built on ``help`` alone, because on firmware this library
     has not seen ``help`` is the only evidence there is. ``wifi_ssid_set`` is
     the case where that is too conservative: we know it works. ``check=False``
-    is the escape hatch, and the device is then the one that answers.
+    is the escape hatch, and the device is then the one that answers -- which
+    is exactly what :meth:`Sign.set_wifi` and ``Plan.execute`` now take for
+    that one command, and for no other.
     """
     s = sign(allow_destructive=True)
     s.refresh_commands()

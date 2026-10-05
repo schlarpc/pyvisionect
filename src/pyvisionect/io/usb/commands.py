@@ -18,10 +18,11 @@ Two findings matter enough to call out:
   the vendor, is not printed by ``help``, and yet answers ``E: Invalid
   argument(s)`` to a bare call -- which a missing command does not; it answers
   ``Command '...' not recognised.``  So it exists.  It is the documented way to
-  set an SSID containing a space, and it takes the SSID alone, with no PSK.
-  Whether the console's parser will actually carry a space through it is a
-  separate, **unverified** question -- see ``A2`` in ``OPEN-QUESTIONS.md`` and
-  :func:`pyvisionect.io.usb.provisioning.plan_wifi`.
+  set an SSID containing a space, it takes the SSID alone with no PSK, and it
+  **does** carry the space: measured on 7.4.4407, it consumes everything after
+  the command name and one separating space verbatim, with no quoting or
+  escaping convention at all.  See ``A2`` in ``OPEN-QUESTIONS.md`` and
+  :func:`pyvisionect.io.usb.provisioning.plan_wifi`, which emits it.
 * **...and exactly one.**  49 of the 97 unlisted commands have since been
   probed by bare invocation on the device -- every one whose vendor-documented
   arity includes a required argument, which is what makes the probe safe --
@@ -342,8 +343,9 @@ _ROWS = (
     ('wifi_mac_conf_set', '<mac>', 'Set WiFi MAC cfg', 'DESTRUCTIVE'),
     # Hidden: absent from `help`, but present and functional. A bare call answers
     # `E: Invalid argument(s)`, not `Command ... not recognised`. Verified on
-    # 7.4.4407. This is the documented way to set an SSID containing spaces,
-    # and it takes the SSID alone -- no PSK needed.
+    # 7.4.4407. This is the documented way to set an SSID containing spaces, it
+    # takes the SSID alone -- no PSK needed -- and the space really does survive:
+    # it takes the rest of the line verbatim. See OPEN-QUESTIONS.md A2.
     ('wifi_ssid_set', '<ssid>', 'Set WiFi SSID (hidden; handles spaces)', 'DESTRUCTIVE'),
     ('wifi_psk_set', '<psk>', 'Set wpa2 password', 'DESTRUCTIVE'),
     ('wifi_security_set', '<security>', 'Set WiFi security mode', 'DESTRUCTIVE'),

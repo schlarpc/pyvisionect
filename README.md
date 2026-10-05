@@ -427,12 +427,14 @@ of an iceberg, and the uncompiled hardware families really are uncompiled.
 
 Two findings change documented advice:
 
-- **`wifi_ssid_set` is hidden, not missing.** It is the vendor's documented
-  workaround for an SSID containing a space, it takes the SSID alone with no
-  PSK, and this firmware has it. Whether the console's parser carries a space
-  through it is still untested on the device, so `plan_wifi` keeps refusing a
-  spaced SSID — but it now says the route exists and is unverified rather than
-  claiming it is impossible.
+- **`wifi_ssid_set` is hidden, not missing — and it carries the space.** It is
+  the vendor's documented workaround for an SSID containing a space, it takes
+  the SSID alone with no PSK, and this firmware has it. Measured on the device:
+  it takes **everything after the command name and one separating space,
+  verbatim**, with no quoting or escaping convention, so `plan_wifi` and
+  `Sign.set_wifi` now emit it unquoted for a spaced SSID instead of refusing.
+  The passphrase is still refused, for a different reason: its field has no read
+  path, so a truncated one cannot be detected.
 - **`flash_print` is not listed**, so there is no *known* one-shot settings
   dump. `Sign.dump()` walks the per-area getters instead. It is nullary, and a
   bare call to a nullary command executes it, so the existence probe that

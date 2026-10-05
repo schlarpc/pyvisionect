@@ -94,16 +94,128 @@ The vendor page documents **162** commands, not 160. `rs9110_scan` and
 looked self-consistent. `commands.py` now asserts the arithmetic
 (`present-and-documented + unlisted == documented`) so that cannot recur.
 
-### A2. Can an SSID contain spaces? — OPEN (unblocked by A1's finding)
-`wifi_ssid_set` takes the **SSID alone**, no PSK, so this needs no credentials.
-Without `flash_save`: read `wifi_conf_get`, try bare / `"quoted"` / `\ ` escaped
-forms of a name with a space and an apostrophe, read back, restore. Answers
-whether the console tokenises on whitespace or takes the rest of the line, and
-decides whether `provisioning.py` can honestly claim arbitrary SSIDs.
+### A2. Can an SSID contain spaces? — **ANSWERED: yes. `wifi_ssid_set` takes the rest of the line verbatim** (2026-10-05)
 
-Until then `plan_wifi` and `Sign.set_wifi` still refuse a spaced SSID, but the
-refusal now says the route exists and is untested rather than claiming it is
-impossible. Settling this is a one-line change to `plan_wifi`.
+**Yes, and there is no quoting convention at all.** `wifi_ssid_set` consumes
+everything after the single space that separates it from its argument, byte for
+byte, and writes that to TCLV 65. Interior spaces, runs of spaces, a leading
+space, a trailing space, apostrophes, double quotes, single quotes, backslashes
+and percent signs all land **literally**. So a spaced SSID works, and *any*
+attempt to quote or escape it corrupts it — the quotes become part of the SSID.
+
+Measured on the live sign over `/dev/ttyUSB0`, firmware 7.4.4407, CLI 1.2.
+Every write was RAM-only; `flash_save` was never sent. Starting config was
+`SSID: Spaceless / Security: wpa2 / Band: 0`, `Conn: tcp open`, and it was
+restored and verified at the end of both runs. 16 forms were tried, each one
+followed immediately by `wifi_conf_get`, so the column below is what the
+*device* read back, not what the setter claimed.
+
+| sent after `wifi_ssid_set ` | reply | SSID read back |
+|---|---|---|
+| `Oneword` | `WiFi SSID set` | `Oneword` |
+| `Don't` | `WiFi SSID set` | `Don't` |
+| `"Quoted"` | `WiFi SSID set` | `"Quoted"` |
+| `'Quoted'` | `WiFi SSID set` | `'Quoted'` |
+| `Back\slash` | `WiFi SSID set` | `Back\slash` |
+| `Two Words` | `WiFi SSID set` | `Two Words` |
+| `Two  Words` (two spaces) | `WiFi SSID set` | `Two  Words` (two spaces) |
+| `Three Little Words` | `WiFi SSID set` | `Three Little Words` |
+| `"Two Words"` | `WiFi SSID set` | `"Two Words"` |
+| `'Two Words'` | `WiFi SSID set` | `'Two Words'` |
+| `Two\ Words` | `WiFi SSID set` | `Two\ Words` |
+| `Two<TAB>Words` | *(see below)* | `TwoWords` |
+| `Two%20Words` | `WiFi SSID set` | `Two%20Words` |
+| `McDonald's Free WiFi` | `WiFi SSID set` | `McDonald's Free WiFi` |
+| `"McDonald's Free WiFi"` | `WiFi SSID set` | `"McDonald's Free WiFi"` |
+| `McDonald\'s\ Free\ WiFi` | `WiFi SSID set` | `McDonald\'s\ Free\ WiFi` |
+
+A second run added the whitespace edge cases and a reproduction:
+
+| sent after `wifi_ssid_set ` | SSID read back (raw frame) |
+|---|---|
+| ` Two Words` (extra leading space) | `SSID:  Two Words` — the extra space is **kept** |
+| `Two Words ` (trailing space) | `SSID: Two Words ` — the trailing space is **kept** |
+| 31 chars, no space | all 31 |
+| `Twelve Chars Plus More Padding X` (exactly 32) | all 32 |
+| `McDonald's Free WiFi` again | `McDonald's Free WiFi` — reproduces |
+
+#### Why this is "rest of the line", not "argv[1]"
+
+Three observations rule out tokenise-then-take-the-first-token, and also rule
+out tokenise-then-rejoin-with-single-spaces:
+
+* **A run of two spaces survives as two spaces.** An argv rejoin would collapse
+  it.
+* **A leading space survives.** The dispatcher consumes the command name and
+  exactly one separator, then stops looking.
+* **A trailing space survives**, visible in the raw frame as
+  `SSID: Two Words \r\n`.
+
+That last one is easy to miss, because `SerialConsole` strips each reply line
+before putting it in `CommandResult.lines`. The trailing space is only in
+`CommandResult.raw`. Anyone re-running this must read the raw frame, or they
+will conclude the firmware trims and be wrong.
+
+#### TAB is the line editor's help key, not an argument character
+
+`wifi_ssid_set Two<TAB>Words` is the one form that did something unexpected.
+The raw frame:
+
+```
+wifi_ssid_set Two\r\r\nwifi_ssid_set <ssid>: Set WiFi SSID\r\r\n> wifi_ssid_set TwoWords\r\nWiFi SSID set\r\n>
+```
+
+TAB was swallowed by the console's own line editing, which printed the matched
+command's usage line and redisplayed the buffer; the remaining `Words` was
+appended to `Two`, and the SSID that landed was `TwoWords`. So **TAB cannot be
+put into an SSID over this console**, and as a bonus the firmware has a
+usage-lookup key that prints a hidden command's syntax — `wifi_ssid_set <ssid>`,
+straight from the device, which is independent corroboration of the arity A1
+inferred from the vendor page.
+
+#### What changed in the library
+
+`plan_wifi` and `Sign.set_wifi` no longer refuse a spaced SSID. When the SSID
+contains whitespace they emit the three single-argument setters instead of
+`wifi_conf_set`:
+
+```
+wifi_psk_set <psk>
+wifi_security_set <security>
+wifi_ssid_set <ssid>
+```
+
+SSID last, so the field that decides association is the final write. Two
+consequences worth knowing:
+
+* **Band (TCLV 68) cannot be written on this route.** There is no
+  `wifi_band_set` — not in `help`, not in the vendor's 162 documented commands.
+  `wifi_conf_set` is the only writer, and it is the one command that cannot
+  carry the space. So a spaced SSID with a non-default `band` is still refused,
+  and with `band=0` the plan carries a note that TCLV 68 is left as it is.
+* **`help` still does not list `wifi_ssid_set`**, so `Sign._run`'s post-`refresh_commands`
+  gate would refuse it. The spaced-SSID path passes `check=False`, and
+  `Plan.execute` exempts the names in `HIDDEN_IN_7_4_4407` from its
+  missing-command check. The gate is unchanged for everything else: `help` is
+  still the only evidence on firmware this library has not seen.
+
+#### What this does *not* settle: the PSK — **OPEN**
+
+The old refusal said "the CLI is whitespace-delimited and cannot carry a
+space". That reason is now known to be **wrong** for single-argument commands,
+and `wifi_psk_set` is a single-argument command of exactly the same shape, so it
+very probably carries a space too. It is still refused, for a different and
+better reason: **there is no read path for TCLV 67.** `wifi_conf_get` returns
+SSID, security and band and never the passphrase, so there is no way to check
+what landed. The SSID experiment above was safe precisely because every write
+was read straight back; the PSK has no such oracle, and a silently truncated
+passphrase does not fail loudly — it just stops the sign associating, which on
+this firmware means `E: Max conn errs. Reboot` with `ErrorCode` still `0x0`.
+
+Settling it needs an AP whose passphrase you control, set to something with a
+space, and a willingness to force a re-association (`cs 1`, `cs 3`) and watch
+whether it comes back. That is an afternoon with a spare AP, not a console
+session on a sign someone is using.
 
 ### A3. `vlog_unify_levels` — which end of the scale is quiet? — **ANSWERED: 1 is quiet, and 0 is not a level at all** (2026-10-05)
 

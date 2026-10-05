@@ -32,23 +32,46 @@ thing they will think of.
 Whitespace in an SSID or passphrase
 -----------------------------------
 
-**These plans will not set an SSID or passphrase containing whitespace.**  The
-CLI is whitespace-delimited and single-line, so a space in ``wifi_conf_set
-<ssid> <psk> <security> <band>`` shifts every later argument into the wrong
-field.
+**A spaced SSID works, and is emitted.**  Measured on firmware 7.4.4407:
+``wifi_ssid_set`` takes **everything after the command name and one separating
+space, verbatim** -- interior spaces, runs of spaces, leading and trailing
+spaces, apostrophes, quotes and backslashes all land in TCLV 65 byte for byte.
+There is **no quoting or escaping convention**, so ``"My Home WiFi"`` sets an
+SSID whose first and last characters are double quotes.  See ``A2`` in
+``OPEN-QUESTIONS.md`` for the full table of what landed for each form.
 
-The vendor's documented workaround is ``wifi_ssid_set``, which takes the SSID
-alone and needs no PSK.  Firmware 7.4.4407 **does have it** -- it is hidden from
-``help``, not missing (see
-:data:`pyvisionect.io.usb.commands.HIDDEN_IN_7_4_4407`).  What is *not* known is
-whether the console's parser hands that command the rest of the line or just the
-first token; nobody has tried a spaced SSID on the device, which is item ``A2``
-in ``OPEN-QUESTIONS.md``.  So :func:`plan_wifi` still refuses up front, and now
-says why: emitting ``wifi_ssid_set My Home WiFi`` would be shipping a plan whose
-outcome we would be guessing at, and a truncated SSID drops the sign off the
-network -- recoverable only over USB.  Settle A2 first and this becomes a
-one-line change.  ``wifi_psk_set`` has no such escape hatch at all: it is
-already the single-argument setter, with the same parser.
+So when the SSID contains whitespace, :func:`plan_wifi` drops ``wifi_conf_set``
+-- which really is positional, and would shift the psk, security and band
+arguments along by one -- and emits the three single-argument setters instead::
+
+    wifi_psk_set <psk>
+    wifi_security_set <security>
+    wifi_ssid_set <ssid>
+
+SSID last, so the field that decides association is the final write.  Two
+things do not come free:
+
+* **Band (TCLV 68) cannot be written this way.**  There is no ``wifi_band_set``
+  -- not in ``help``, not in the vendor's 162 documented commands --
+  ``wifi_conf_set`` is its only writer, and that is the one command the space
+  rules out.  A spaced SSID with a non-default *band* is therefore still
+  refused; with ``band=0`` the plan carries a note that TCLV 68 is left alone.
+* **``help`` still does not list ``wifi_ssid_set``.**  It is hidden, not absent
+  (:data:`pyvisionect.io.usb.commands.HIDDEN_IN_7_4_4407`), so
+  :meth:`Plan.execute` exempts hidden names from its missing-command check and
+  sends them with the firmware-command gate off.  Nothing else about that gate
+  changes: ``help`` is still the only evidence available on a firmware this
+  library has not seen.
+
+**The passphrase is still refused.**  ``wifi_psk_set`` is a single-argument
+command of exactly the same shape, so it very probably carries a space too --
+but there is **no read path for TCLV 67**.  ``wifi_conf_get`` returns SSID,
+security and band and never the passphrase, so nothing can be read back to
+check.  The SSID experiment was safe because every write was read straight
+back; a truncated passphrase has no such oracle and fails silently, as a sign
+that will not associate and then power-cycles itself on
+``E: Max conn errs. Reboot`` with ``ErrorCode`` still ``0x0``.  Rename the
+network, or move the sign by re-pointing the DNS name it already holds.
 '''
 
 from __future__ import annotations
@@ -56,7 +79,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-from .commands import COMMANDS, Kind
+from .commands import COMMANDS, HIDDEN_IN_7_4_4407, Kind
 from .console import CommandResult
 from .device import Sign
 
@@ -126,6 +149,17 @@ class Step:
         """
         return self.name in COMMANDS
 
+    @property
+    def hidden(self) -> bool:
+        """Whether ``help`` omits this command although the firmware has it.
+
+        True only for :data:`~pyvisionect.io.usb.commands.HIDDEN_IN_7_4_4407`
+        -- ``wifi_ssid_set``, and nothing else as of 7.4.4407.  Such a step has
+        to bypass :meth:`~pyvisionect.io.usb.device.Sign`'s ``help``-derived
+        gate, which would otherwise refuse a command that demonstrably works.
+        """
+        return self.name in HIDDEN_IN_7_4_4407
+
 
 @dataclass(frozen=True, slots=True)
 class Plan:
@@ -167,7 +201,12 @@ class Plan:
         """The plan as readable text: every command, what it does, and the caveats."""
         out = [f"bootstrap plan: {self.name}", ""]
         for index, step in enumerate(self.steps, 1):
-            flag = "" if step.in_firmware else "   [NOT IN FIRMWARE 7.4.4407]"
+            if not step.in_firmware:
+                flag = "   [NOT IN FIRMWARE 7.4.4407]"
+            elif step.hidden:
+                flag = "   [HIDDEN FROM help, BUT PRESENT AND VERIFIED]"
+            else:
+                flag = ""
             out.append(f"{index}. {step.command}{flag}")
             out.append(f"     {step.why}")
         if self.notes:
@@ -191,12 +230,15 @@ class Plan:
             RuntimeError: if the plan contains a command this firmware lacks and
                 the firmware's command list is known. Better to refuse than to
                 run half a bootstrap and leave the sign with new WiFi and an old
-                server, which is the worst of both.
+                server, which is the worst of both. A :attr:`Step.hidden`
+                command is exempt: ``help`` does not list ``wifi_ssid_set`` and
+                the device answers it anyway, so refusing on ``help`` alone
+                would block a verified command.
         """
         missing = [
             step.name
             for step in self.steps
-            if sign.has(step.name) is False
+            if sign.has(step.name) is False and not step.hidden
         ]
         if missing:
             raise RuntimeError(
@@ -207,7 +249,11 @@ class Plan:
         results: list[CommandResult] = []
         for step in self.steps:
             results.append(
-                sign._run(step.command, expect_prompt=step.expect_prompt)
+                sign._run(
+                    step.command,
+                    check=not step.hidden,
+                    expect_prompt=step.expect_prompt,
+                )
             )
         return results
 
@@ -235,60 +281,117 @@ def plan_wifi(
     security: str = WifiSecurity.WPA2,
     band: int = 0,
 ) -> Plan:
-    """Set the WiFi credentials: ``wifi_conf_set`` -- TCLV 65/67/66/68.
+    """Set the WiFi credentials -- TCLV 65/67/66/68.
+
+    Normally one ``wifi_conf_set``.  When *ssid* contains whitespace that
+    command cannot be used, because it is positional and the space would shift
+    *psk*, *security* and *band* along by one; the plan becomes
+    ``wifi_psk_set`` -> ``wifi_security_set`` -> ``wifi_ssid_set`` instead, with
+    the SSID written last.  ``wifi_ssid_set`` takes the rest of the line
+    verbatim -- verified on 7.4.4407, see the module docstring -- so no quoting
+    is applied, and none would help.
 
     Args:
-        ssid: TCLV 65.
-        psk: TCLV 67.
+        ssid: TCLV 65. May contain spaces. May **not** contain a tab: the
+            console's line editor treats TAB as its usage-lookup key and eats
+            it, so the SSID that lands is the two halves concatenated.
+        psk: TCLV 67. Whitespace is refused; see the module docstring.
         security: TCLV 66. One of :attr:`WifiSecurity.ALL`.
-        band: TCLV 68 -- 0 dual, 1 2.4 GHz, 2 5 GHz.
+        band: TCLV 68 -- 0 dual, 1 2.4 GHz, 2 5 GHz. Only ``wifi_conf_set``
+            writes it, so a spaced *ssid* requires the default ``0``.
 
     Raises:
-        ValueError: if *ssid* or *psk* contains whitespace, or *security* is not
-            a known value. See the module docstring: ``wifi_ssid_set`` could
-            carry a spaced SSID and firmware 7.4.4407 does have it, but whether
-            its parser accepts the space is unverified, so this refuses rather
-            than guesses.
+        ValueError: if *security* is not a known value; if *psk* contains
+            whitespace; if *ssid* contains a tab, a carriage return or a
+            newline; or if *ssid* contains whitespace and *band* is not 0.
     """
     if security not in WifiSecurity.ALL:
         raise ValueError(
             f"security must be one of {WifiSecurity.ALL}, got {security!r}; "
             "these are ASCII strings, not integers"
         )
-    if any(c.isspace() for c in ssid):
-        raise ValueError(
-            "ssid contains whitespace. wifi_conf_set is single-line and "
-            "whitespace-delimited, so the space would shift the psk, security "
-            "and band arguments along by one. The command the vendor documents "
-            "for this case -- wifi_ssid_set -- is present on firmware 7.4.4407 "
-            "after all (hidden from help, not missing), and it takes the SSID "
-            "alone with no PSK, but whether its parser carries the space "
-            "through is unverified on the device, so no plan is emitted for it: "
-            "rename the network, probe wifi_ssid_set by hand first, or leave "
-            "WiFi alone and move the sign by re-pointing the DNS name it "
-            "already holds."
-        )
     if any(c.isspace() for c in psk):
         raise ValueError(
-            "psk contains whitespace. The CLI is single-line and "
-            "whitespace-delimited, and unlike the SSID there is no "
-            "single-argument escape hatch: wifi_psk_set is that command "
-            "already, and it shares the parser. Rename the network, or leave "
-            "WiFi alone and move the sign by re-pointing the DNS name it "
-            "already holds."
+            "psk contains whitespace. wifi_psk_set is a single-argument "
+            "command and so probably would carry it -- wifi_ssid_set, the same "
+            "shape, provably does -- but there is no read path for TCLV 67: "
+            "wifi_conf_get returns SSID, security and band and never the "
+            "passphrase, so there is no way to check what landed. A truncated "
+            "passphrase does not fail loudly, it just stops the sign "
+            "associating, and this firmware then power-cycles itself on "
+            "'E: Max conn errs. Reboot' with ErrorCode still 0x0. Rename the "
+            "network, or leave WiFi alone and move the sign by re-pointing the "
+            "DNS name it already holds."
+        )
+    bad = {"\t": "a tab", "\r": "a carriage return", "\n": "a newline"}
+    for char, name in bad.items():
+        if char in ssid:
+            raise ValueError(
+                f"ssid contains {name}, which this console cannot carry. CR "
+                "and LF submit the line; TAB is the line editor's "
+                "usage-lookup key and is swallowed, so 'Two<TAB>Words' sets "
+                "'TwoWords' -- measured on 7.4.4407. Spaces are fine."
+            )
+    if not any(c.isspace() for c in ssid):
+        return Plan(
+            name="wifi",
+            steps=(
+                Step(
+                    f"wifi_conf_set {ssid} {psk} {security} {band}",
+                    "writes TCLV 65/67/66/68 (SSID, password, security, band) to RAM. "
+                    "Note the argument order is ssid, psk, security, band while the "
+                    "ids run 65, 67, 66, 68.",
+                ),
+            ),
+            notes=(
+                "RAM only. Follow with flash_save, or use plan_bootstrap.",
+                "wifi_conf_get will read back the SSID, security and band but never "
+                "the passphrase -- there is no read path for TCLV 67.",
+            ),
+        )
+    if band != 0:
+        raise ValueError(
+            f"ssid {ssid!r} contains whitespace, so wifi_conf_set is out, and "
+            f"wifi_conf_set is the only command that writes the band (TCLV 68) "
+            f"-- there is no wifi_band_set in help or in the vendor's 162 "
+            f"documented commands. So band={band} cannot be combined with a "
+            f"spaced SSID. Pass band=0 (dual, the default) to leave TCLV 68 as "
+            f"the device already has it, or rename the network."
         )
     return Plan(
         name="wifi",
         steps=(
             Step(
-                f"wifi_conf_set {ssid} {psk} {security} {band}",
-                "writes TCLV 65/67/66/68 (SSID, password, security, band) to RAM. "
-                "Note the argument order is ssid, psk, security, band while the "
-                "ids run 65, 67, 66, 68.",
+                f"wifi_psk_set {psk}",
+                "writes TCLV 67. Separate from the SSID because wifi_conf_set is "
+                "positional and the space in the SSID would shift this argument.",
+            ),
+            Step(
+                f"wifi_security_set {security}",
+                "writes TCLV 66, an ASCII string -- 'none', 'wpa2' or 'wpa2e'.",
+            ),
+            Step(
+                f"wifi_ssid_set {ssid}",
+                "writes TCLV 65. Hidden from help on 7.4.4407 but present, and it "
+                "takes the rest of the line verbatim, which is what carries the "
+                "space. Last on purpose: the SSID is the field that decides "
+                "association, so it is the one written once everything else is in "
+                "place.",
             ),
         ),
         notes=(
             "RAM only. Follow with flash_save, or use plan_bootstrap.",
+            f"The SSID has whitespace, so this is the three-setter route and "
+            f"wifi_conf_set is not used. The SSID is sent unquoted and "
+            f"unescaped, because wifi_ssid_set takes the rest of the line "
+            f"literally: it will land as exactly {ssid!r}, quotes and "
+            f"backslashes included if you put any there.",
+            "Band (TCLV 68) is NOT written by this route -- only wifi_conf_set "
+            "writes it and there is no wifi_band_set. The device keeps whatever "
+            "it already has; read it back with wifi_conf_get.",
+            "wifi_ssid_set is absent from help, so Sign's help-derived command "
+            "gate is bypassed for that one step. The device answers it; help is "
+            "simply an incomplete index.",
             "wifi_conf_get will read back the SSID, security and band but never "
             "the passphrase -- there is no read path for TCLV 67.",
         ),
@@ -349,7 +452,9 @@ def plan_bootstrap(
 ) -> Plan:
     """The full first-time sequence, verbatim from the vendor reference.
 
-    ``wifi_conf_set`` -> ``server_tcp_set`` -> ``flash_save`` -> ``reboot``.
+    ``wifi_conf_set`` -> ``server_tcp_set`` -> ``flash_save`` -> ``reboot``,
+    with the WiFi step expanding to three commands when the SSID has a space in
+    it (see :func:`plan_wifi`).
 
     Args:
         ssid: TCLV 65, or None to leave WiFi untouched -- in which case this is
@@ -365,8 +470,11 @@ def plan_bootstrap(
         reboot: drop the final reboot.
 
     Raises:
-        ValueError: if *ssid* is given without *psk*, or either contains
-            whitespace.
+        ValueError: if *ssid* is given without *psk*, or whatever
+            :func:`plan_wifi` refuses -- a *psk* containing whitespace, a tab
+            in the *ssid*, or a spaced *ssid* with a non-default *band*. A
+            spaced *ssid* on its own is fine and expands to the three-setter
+            route.
     """
     steps: list[Step] = []
     if conn_type is not None:

@@ -122,9 +122,12 @@ A **bare invocation** distinguishes present-but-hidden from genuinely absent: [W
 
 - **The documented workaround for an SSID containing a space is hidden, not missing.**
   `wifi_ssid_set` is documented by the vendor, is **not** printed by `help`, and
-  nevertheless answers. It takes the SSID alone with no password. [W] (Whether the
-  console's parser carries a space *through* it is still untested — **[GAP]**. So the
-  route exists and is unverified, rather than being impossible.)
+  nevertheless answers. It takes the SSID alone with no password, and the space does
+  survive: measured on 7.4.4407 it takes **everything after the command name and one
+  separating space, verbatim**, with no quoting or escaping convention — so `"My AP"`
+  sets an SSID whose first and last characters are double quotes. [W] TAB is the one
+  whitespace character it cannot carry: the console's line editor treats it as a
+  usage-lookup key and swallows it, so `Two<TAB>Words` sets `TwoWords`. [W]
 - **`flash_print` is not listed**, so there is no *known* one-shot settings dump on this
   firmware. Walk the per-area getters instead. It is nullary, so the existence probe above
   is **not** safe to run on it.

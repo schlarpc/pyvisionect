@@ -26,6 +26,9 @@ SETTER_REPLIES = {
     **CAPTURED,
     "help": HELP_TEXT,
     "wifi_conf_set": "rv: 0",
+    "wifi_ssid_set": "WiFi SSID set",
+    "wifi_psk_set": "rv: 0",
+    "wifi_security_set": "rv: 0",
     "server_tcp_set": "rv: 0",
     "flash_save": "rv: 0",
     "conn_type_set": "rv: 0",
@@ -146,58 +149,208 @@ def test_every_step_is_a_command_this_firmware_has() -> None:
 
 
 # -------------------------------------------- whitespace in the credentials
+#
+# `wifi_ssid_set` takes the rest of the line verbatim -- measured on 7.4.4407,
+# `OPEN-QUESTIONS.md` A2.  There is no quoting convention, so the SSID goes out
+# bare and anything quote-like in it lands in the SSID.
 
 
-def test_an_ssid_with_a_space_is_refused_with_the_reason() -> None:
-    """And the reason is now "unverified", not "the command is missing".
+def test_a_spaced_ssid_uses_the_three_setter_route() -> None:
+    """``wifi_conf_set`` is positional, so a spaced SSID cannot use it."""
+    plan = plan_wifi("My Home WiFi", "secret")
+    assert plan.commands == (
+        "wifi_psk_set secret",
+        "wifi_security_set wpa2",
+        "wifi_ssid_set My Home WiFi",
+    )
 
-    ``wifi_ssid_set`` *is* in this firmware -- hidden from ``help``, not absent
-    -- and it takes the SSID alone. What nobody has established is whether the
-    console's parser hands it a spaced SSID or just the first token
-    (``OPEN-QUESTIONS.md`` A2), so no plan is emitted for it.
+
+def test_the_ssid_is_written_last() -> None:
+    """It is the field that decides association, so it goes in once the rest is."""
+    assert plan_wifi("My Home WiFi", "secret").commands[-1].startswith("wifi_ssid_set ")
+
+
+def test_the_spaced_ssid_is_sent_bare_not_quoted_or_escaped() -> None:
+    """Quoting would corrupt it: the quotes land *in* the SSID.
+
+    Measured: ``wifi_ssid_set "Two Words"`` read back as ``"Two Words"``,
+    quotes included, and ``Two\\ Words`` read back with the backslash.
     """
-    with pytest.raises(ValueError, match="wifi_ssid_set") as excinfo:
-        plan_wifi("My Home WiFi", "psk")
-    message = str(excinfo.value)
-    assert "unverified" in message
-    assert "hidden from help, not missing" in message
-    assert "absent" not in message, "it is not absent; that was the old claim"
+    command = plan_wifi("McDonald's Free WiFi", "p").commands[-1]
+    assert command == "wifi_ssid_set McDonald's Free WiFi"
+    assert '"' not in command
+    assert "\\" not in command
 
 
-def test_the_ssid_refusal_does_not_claim_a_spaced_ssid_is_impossible() -> None:
-    """The route exists and is untested. Those are different things, and the
-    message has to leave the reader able to go and settle A2."""
-    with pytest.raises(ValueError) as excinfo:
-        plan_wifi("My Home WiFi", "psk")
-    message = str(excinfo.value)
-    assert "no way" not in message
-    assert "cannot be set" not in message
-    assert "probe wifi_ssid_set by hand" in message
+def test_a_spaceless_ssid_still_uses_the_one_shot_wifi_conf_set() -> None:
+    """The common case is unchanged -- one command, all four fields."""
+    assert plan_wifi("ExampleAP", "secret", band=2).commands == (
+        "wifi_conf_set ExampleAP secret wpa2 2",
+    )
 
 
-def test_a_psk_with_a_space_is_refused_too() -> None:
-    """The PSK has no hidden escape hatch: ``wifi_psk_set`` is already it."""
+def test_a_spaced_ssid_with_a_non_default_band_is_refused() -> None:
+    """There is no ``wifi_band_set``, in help or in the vendor reference.
+
+    ``wifi_conf_set`` is TCLV 68's only writer and it is the command the space
+    rules out, so the two requests are genuinely incompatible. Saying so beats
+    silently ignoring the band.
+    """
+    with pytest.raises(ValueError, match="wifi_band_set") as excinfo:
+        plan_wifi("My Home WiFi", "p", band=2)
+    assert "band=2 cannot be combined with a spaced SSID" in str(excinfo.value)
+
+
+def test_a_spaced_ssid_with_the_default_band_says_band_is_untouched() -> None:
+    notes = " ".join(plan_wifi("My Home WiFi", "p").notes)
+    assert "Band (TCLV 68) is NOT written by this route" in notes
+
+
+def test_the_plan_quotes_the_exact_ssid_that_will_land() -> None:
+    """A dry run has to show the bytes, because there is no escaping to undo."""
+    notes = " ".join(plan_wifi('My "Home" WiFi', "p").notes)
+    assert repr('My "Home" WiFi') in notes
+
+
+def test_a_tab_in_the_ssid_is_refused_because_the_line_editor_eats_it() -> None:
+    """Measured: ``wifi_ssid_set Two<TAB>Words`` set ``TwoWords``.
+
+    TAB is the console's usage-lookup key -- it printed
+    ``wifi_ssid_set <ssid>: Set WiFi SSID`` and redisplayed the buffer with the
+    tab gone. So this is the one whitespace character that really cannot be
+    carried, and it fails *silently* rather than erroring, which is why it is
+    refused here.
+    """
+    with pytest.raises(ValueError, match="a tab") as excinfo:
+        plan_wifi("Two\tWords", "p")
+    assert "TwoWords" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("char", ["\r", "\n"])
+def test_cr_and_lf_in_the_ssid_are_refused(char: str) -> None:
+    """CR submits the line; LF desynchronises the stream."""
+    with pytest.raises(ValueError):
+        plan_wifi(f"Two{char}Words", "p")
+
+
+def test_the_wifi_ssid_set_step_is_marked_hidden() -> None:
+    """So ``Plan.execute`` knows to bypass the help-derived gate for it."""
+    steps = {step.name: step for step in plan_wifi("My Home WiFi", "p").steps}
+    assert steps["wifi_ssid_set"].hidden is True
+    assert steps["wifi_ssid_set"].in_firmware is True, "it is in the command table"
+    assert steps["wifi_psk_set"].hidden is False
+
+
+def test_the_dry_run_flags_the_hidden_step() -> None:
+    text = plan_wifi("My Home WiFi", "p").describe()
+    assert "[HIDDEN FROM help, BUT PRESENT AND VERIFIED]" in text
+
+
+def test_nothing_in_a_spaceless_plan_is_flagged_hidden() -> None:
+    assert "HIDDEN" not in plan_wifi("ExampleAP", "p").describe()
+
+
+def test_a_hidden_step_is_executed_rather_than_refused_after_a_refresh() -> None:
+    """``help`` does not list ``wifi_ssid_set``, and it works anyway.
+
+    Without the exemption this plan would raise ``RuntimeError`` from
+    ``execute``'s missing-command check, or ``CommandNotInFirmware`` from
+    ``_run``'s gate -- refusing a command the device answers.
+    """
+    s = sign(allow_destructive=True)
+    s.refresh_commands()
+    assert s.has("wifi_ssid_set") is False, "help really does omit it"
+    results = plan_wifi("My Home WiFi", "secret").execute(s)
+    assert [r.command for r in results] == [
+        "wifi_psk_set secret",
+        "wifi_security_set wpa2",
+        "wifi_ssid_set My Home WiFi",
+    ]
+
+
+def test_a_psk_with_a_space_is_refused_for_the_read_back_reason() -> None:
+    """Not "the parser cannot carry it" -- that reason is now known to be wrong.
+
+    ``wifi_psk_set`` is the same shape as ``wifi_ssid_set``, which provably
+    takes the rest of the line. The reason to refuse is that TCLV 67 has no
+    read path, so nothing can be checked, and the failure is silent.
+    """
     with pytest.raises(ValueError, match="whitespace") as excinfo:
         plan_wifi("ExampleAP", "pass word")
     message = str(excinfo.value)
-    assert "no single-argument escape hatch" in message
-    assert "wifi_psk_set is that command" in message
-    assert "wifi_ssid_set" not in message, "that escape hatch is the SSID's, not the PSK's"
+    assert "no read path for TCLV 67" in message
+    assert "whitespace-delimited" not in message, "that was the old, wrong reason"
+    assert "Max conn errs" in message, "it says what a wrong guess looks like"
 
 
-def test_the_refusal_points_at_the_dns_alternative() -> None:
+def test_the_psk_refusal_points_at_the_dns_alternative() -> None:
     with pytest.raises(ValueError, match="re-pointing the DNS name"):
-        plan_wifi("My SSID", "psk")
+        plan_wifi("ExampleAP", "pass word")
 
 
-def test_bootstrap_refuses_a_spaced_ssid_before_building_anything() -> None:
-    with pytest.raises(ValueError, match="whitespace"):
-        plan_bootstrap("My SSID", "psk", "host")
+def test_bootstrap_carries_a_spaced_ssid_all_the_way_through() -> None:
+    plan = plan_bootstrap("My Home WiFi", "secret", "host")
+    assert plan.commands[:3] == (
+        "wifi_psk_set secret",
+        "wifi_security_set wpa2",
+        "wifi_ssid_set My Home WiFi",
+    )
+    assert plan.unavailable == (), "every step is a command the table knows"
 
 
-def test_the_typed_setter_refuses_the_same_way() -> None:
-    with pytest.raises(ValueError, match="hidden from help, not missing"):
-        sign(allow_destructive=True).set_wifi("My SSID", "psk")
+def test_bootstrap_still_refuses_a_spaced_psk_before_building_anything() -> None:
+    with pytest.raises(ValueError, match="no read path for TCLV 67"):
+        plan_bootstrap("ExampleAP", "pass word", "host")
+
+
+def test_the_typed_setter_takes_the_same_route() -> None:
+    """``Sign.set_wifi`` delegates to ``plan_wifi`` so the two cannot drift."""
+    s = sign(allow_destructive=True)
+    result = s.set_wifi("My Home WiFi", "secret")
+    assert result.command == "wifi_ssid_set My Home WiFi", "the last step's result"
+    assert [r.command for r in s.console.transcript] == [
+        "wifi_psk_set secret",
+        "wifi_security_set wpa2",
+        "wifi_ssid_set My Home WiFi",
+    ]
+
+
+def test_the_typed_setter_still_sends_one_command_for_a_spaceless_ssid() -> None:
+    s = sign(allow_destructive=True)
+    s.set_wifi("ExampleAP", "secret")
+    assert [r.command for r in s.console.transcript] == [
+        "wifi_conf_set ExampleAP secret wpa2 0"
+    ]
+
+
+def test_the_typed_setter_refuses_a_spaced_psk_the_same_way() -> None:
+    with pytest.raises(ValueError, match="no read path for TCLV 67"):
+        sign(allow_destructive=True).set_wifi("ExampleAP", "pass word")
+
+
+def test_the_spaced_route_writes_the_security_string_too() -> None:
+    """``wifi_conf_set`` wrote TCLV 66 as argument 3; the split route needs its own."""
+    assert plan_wifi("My Home WiFi", "p", security=WifiSecurity.WPA2_ENTERPRISE).commands == (
+        "wifi_psk_set p",
+        "wifi_security_set wpa2e",
+        "wifi_ssid_set My Home WiFi",
+    )
+
+
+def test_the_typed_setter_now_validates_security() -> None:
+    """New: it delegates to ``plan_wifi``, which has always checked this.
+
+    ``set_wifi_security`` remains the unvalidated door, for a firmware that
+    takes a value this library has not heard of.
+    """
+    with pytest.raises(ValueError, match="ASCII strings, not integers"):
+        sign(allow_destructive=True).set_wifi("ExampleAP", "p", security="WPA3")
+
+
+def test_the_typed_setter_still_needs_allow_destructive_for_the_hidden_route() -> None:
+    """``check=False`` bypasses the firmware gate, not the danger tier."""
+    with pytest.raises(DangerousCommandRefused):
+        sign().set_wifi("My Home WiFi", "secret")
 
 
 def test_a_plan_naming_a_missing_command_reports_it_rather_than_half_running() -> None:

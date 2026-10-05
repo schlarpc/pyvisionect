@@ -141,16 +141,28 @@ Incidental finding: the vendor's page documents **162** commands, not the 160 pr
 counted. `rs9110_scan` and `rs9113_scan` were missing from both the documented total and the
 unlisted set, so the books were out by two at each end and still looked self-consistent.
 
-### Can an SSID contain a space? — OPEN
+### Can an SSID contain a space? — ANSWERED: yes, and there is no quoting convention
 
-The documented workaround is a setter that takes the SSID alone, with no password — so this
-needs no credentials. Without `flash_save`: read the current configuration, try bare,
-quoted and backslash-escaped forms of a name containing a space and an apostrophe, read
-back, restore. It answers whether the console tokenises on whitespace or takes the rest of
-the line.
+The setter that takes the SSID alone needs no credentials, so this was answerable without
+`flash_save`: 16 forms were written and each one read straight back. It **takes the rest
+of the line verbatim.** Interior spaces, runs of spaces, a leading space, a trailing
+space, apostrophes, double quotes, single quotes, backslashes and percent signs all land
+in the field byte for byte. So a spaced SSID works, and any attempt to quote or escape it
+corrupts it — `"My AP"` reads back with the quotes in it.
 
-Until it is settled, a provisioning tool should **say the route exists and is untested**
-rather than claiming a spaced SSID is impossible.
+Three observations rule out tokenise-then-take-the-first-token *and*
+tokenise-then-rejoin: a run of two spaces survives as two, a leading space survives, and
+a trailing space survives. The last is only visible in the raw frame, because the
+library's line reader strips each reply line — anyone re-running this must read the raw
+bytes or they will conclude the firmware trims.
+
+The one whitespace character that cannot be carried is TAB, and it fails *silently*: the
+console's line editor treats it as a usage-lookup key, prints the matched command's
+syntax, and redisplays the buffer with the tab gone, so `Two<TAB>Words` sets `TwoWords`.
+
+**The passphrase is a separate, still-open question.** Its setter is the same shape, so it
+very probably carries a space too, but there is no read path for the passphrase field —
+nothing can be checked, and a truncated one fails as a sign that will not associate.
 
 ### `vlog_unify_levels`: which end of the scale is quiet? — ANSWERED: 1 is quiet, and 0 is not a level
 

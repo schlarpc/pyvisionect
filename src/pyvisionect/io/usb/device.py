@@ -53,6 +53,8 @@ is refused locally after a refresh even though it would work.  That is the
 conservative choice -- on firmware this library has not seen, ``help`` is the
 only evidence available -- and ``_run(..., check=False)`` is the escape hatch:
 it sends the line and lets the device be the one that says no.
+:meth:`Sign.set_wifi` is the one place in this module that takes it, for
+``wifi_ssid_set`` and only when the SSID has a space in it.
 '''
 
 from __future__ import annotations
@@ -511,50 +513,63 @@ class Sign:
         Note the argument order is SSID, **password**, security, band, while the
         TCLV ids run SSID, security, password: ``(65, 67, 66, 68)``.
 
-        **This method will not send an SSID or PSK containing whitespace.**
-        ``wifi_conf_set`` is one whitespace-delimited line, so a space in either
-        value lands in the wrong field.  The vendor documents ``wifi_ssid_set``
-        as the escape hatch for the SSID case and firmware 7.4.4407 *does* have
-        it -- hidden from ``help``, but present (see
-        :data:`pyvisionect.io.usb.commands.HIDDEN_IN_7_4_4407`).  Whether its
-        parser carries a space through is **untested on the device**
-        (``OPEN-QUESTIONS.md`` A2), so this method refuses rather than
-        truncating someone's SSID on a guess, and
-        :func:`pyvisionect.io.usb.provisioning.plan_wifi` says the same thing
-        before anything is sent.
+        **A spaced SSID is supported**, and takes a different route.
+        ``wifi_conf_set`` is positional, so a space in the SSID would shift the
+        psk, security and band arguments along by one; when *ssid* contains
+        whitespace this sends three single-argument setters instead --
+        ``wifi_psk_set``, ``wifi_security_set``, then ``wifi_ssid_set`` -- and
+        returns the result of the last.  ``wifi_ssid_set`` takes everything
+        after the command name and one space **verbatim**, measured on firmware
+        7.4.4407 (``OPEN-QUESTIONS.md`` A2), so the SSID is sent unquoted and
+        unescaped: quotes or backslashes would land in the SSID itself.
+
+        ``wifi_ssid_set`` is absent from ``help``, so that one command is sent
+        with ``check=False`` -- the gate in :meth:`_run` is built on ``help``
+        and ``help`` is an incomplete index.  It is still in the ``DESTRUCTIVE``
+        tier, so ``allow_destructive=True`` is required either way.
 
         Raises:
-            ValueError: if *ssid* or *psk* contains whitespace.
+            ValueError: if *psk* contains whitespace (no read path for TCLV 67,
+                so nothing can be verified -- see
+                :func:`pyvisionect.io.usb.provisioning.plan_wifi`); if *ssid*
+                contains a tab, CR or LF; if *ssid* contains whitespace and
+                *band* is not 0, since only ``wifi_conf_set`` writes TCLV 68 and
+                there is no ``wifi_band_set``; or if *security* is not one of
+                :attr:`~pyvisionect.io.usb.provisioning.WifiSecurity.ALL`. That
+                last check is new: this method shares its validation with
+                ``plan_wifi`` now, so the typed setter and the dry-runnable plan
+                cannot disagree about what is sendable. Use
+                :meth:`set_wifi_security` to write an unvalidated value.
         '''
-        if any(c.isspace() for c in ssid):
-            raise ValueError(
-                "ssid contains whitespace, and wifi_conf_set is one "
-                "whitespace-delimited line, so the space would land in the "
-                "psk field. wifi_ssid_set takes the SSID alone and firmware "
-                "7.4.4407 does have it -- it is hidden from help, not missing "
-                "-- but whether its parser carries a space through is "
-                "untested, so this will not guess. Rename the network, probe "
-                "wifi_ssid_set by hand first, or move the sign by re-pointing "
-                "the DNS name it already holds."
-            )
-        if any(c.isspace() for c in psk):
-            raise ValueError(
-                "psk contains whitespace, which the single-line "
-                "whitespace-delimited CLI cannot carry. wifi_psk_set has the "
-                "same parser and there is no documented alternative for the "
-                "passphrase, so this one really does look unreachable over USB."
-            )
-        return self._run(f"wifi_conf_set {ssid} {psk} {security} {band}")
+        from .provisioning import plan_wifi
+
+        # plan_wifi owns the validation and the command sequence, so the typed
+        # setter and the dry-runnable plan cannot drift apart.
+        plan = plan_wifi(ssid, psk, security=security, band=band)
+        result: CommandResult | None = None
+        for step in plan.steps:
+            result = self._run(step.command, check=not step.hidden)
+        assert result is not None
+        return result
 
     def set_wifi_psk(self, psk: str) -> CommandResult:
-        """``wifi_psk_set <psk>`` -- TCLV 67. Whitespace is still unreachable.
+        """``wifi_psk_set <psk>`` -- TCLV 67. Whitespace is still refused.
 
-        Unlike the SSID, the passphrase has no hidden single-argument setter to
-        fall back on: ``wifi_psk_set`` *is* the single-argument setter and it
-        shares the whitespace-delimited parser.
+        Not because the parser cannot carry it: ``wifi_ssid_set`` is the same
+        shape and provably takes the rest of the line verbatim, so this one
+        probably does too.  Because **TCLV 67 has no read path** --
+        ``wifi_conf_get`` never returns the passphrase -- so a truncated one
+        cannot be detected, and the symptom is a sign that will not associate
+        and then power-cycles itself.  Guessing here is not recoverable without
+        the cable.
         """
         if any(c.isspace() for c in psk):
-            raise ValueError("a PSK containing whitespace cannot be sent over this CLI")
+            raise ValueError(
+                "a PSK containing whitespace is refused: wifi_psk_set probably "
+                "would carry it, since the same-shaped wifi_ssid_set takes the "
+                "rest of the line verbatim, but TCLV 67 has no read path so "
+                "there is no way to confirm what landed. See OPEN-QUESTIONS.md A2."
+            )
         return self._run(f"wifi_psk_set {psk}")
 
     def set_wifi_security(self, security: str) -> CommandResult:

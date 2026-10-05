@@ -202,9 +202,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
         except ValueError as exc:
-            # A plan this firmware cannot express -- an SSID with a space being
-            # the one that actually happens. A traceback here would bury the
-            # explanation, which is the useful part.
+            # A plan this firmware cannot express -- a passphrase with a space
+            # being the one that actually happens; a spaced SSID is fine and
+            # expands to the three-setter route. A traceback here would bury
+            # the explanation, which is the useful part.
             print(f"cannot build that plan: {exc}", file=sys.stderr)
             return 2
         print(plan.describe())

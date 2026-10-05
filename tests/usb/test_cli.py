@@ -29,12 +29,33 @@ def test_the_dry_run_explains_every_step(capsys: pytest.CaptureFixture[str]) -> 
     assert "re-pointing that name" in out, "the cheaper alternative is offered"
 
 
-def test_provision_refuses_a_spaced_ssid_without_a_traceback(
+def test_provision_dry_runs_a_spaced_ssid_via_wifi_ssid_set(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """It used to refuse this. ``wifi_ssid_set`` carries the space (A2)."""
     code = main(["provision", "/dev/null", "--server", "h", "--ssid", "My AP", "--psk", "p"])
+    assert code == 0, "a dry run of a spaced SSID is a plan now, not a refusal"
+    out = capsys.readouterr().out
+    assert "wifi_ssid_set My AP" in out
+    # Named in the prose that explains the route, but never as a step.
+    commands = [l.split(". ", 1)[1] for l in out.splitlines() if l[:1].isdigit()]
+    assert not any(c.startswith("wifi_conf_set") for c in commands), (
+        "positional, so it cannot carry the space"
+    )
+    assert "HIDDEN FROM help" in out, "the dry run says why that step bypasses the gate"
+
+
+def test_provision_refuses_a_spaced_psk_without_a_traceback(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The SSID is settled; the passphrase is the one with no read-back."""
+    code = main(
+        ["provision", "/dev/null", "--server", "h", "--ssid", "AP", "--psk", "pass word"]
+    )
     assert code == 2
-    assert "wifi_ssid_set" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "no read path for TCLV 67" in err
+    assert "Traceback" not in err
 
 
 def test_provision_requires_a_psk_with_an_ssid() -> None:
