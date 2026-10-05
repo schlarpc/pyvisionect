@@ -129,6 +129,30 @@ the interlacer wants exactly 4 rects of 1440x640, which is the *mechanical* reas
 canvas-space partials cannot survive the fold -- but a screen-space rect never
 enters the fold.
 
+### A11. `display_out_of_sync` false-alarms on every push — OPEN (HA integration)
+
+Confirmed live. A push legitimately leaves the device out of sync until it draws
+the frame and reports the new `DisplayStateCRC` on its next heartbeat --
+measured at **~45-60 s** on this sign. During that window:
+
+```
+t+0s    pushed=3557037784  device=3256188928  in_sync=false
+t+45s   pushed=3557037784  device=3557037784  in_sync=true   updates 3 -> 6
+```
+
+The entity carries `BinarySensorDeviceClass.PROBLEM`, so Home Assistant raises a
+**problem indicator after every normal update**. The underlying tri-state is
+correct and the library is right to report `in_sync=false` in the gap; it is the
+presentation that is wrong.
+
+Fix: debounce against the expected confirmation window -- only assert the problem
+once the device has had a contact *after* the push and still disagrees (i.e.
+`last_contact > last_push` and still out of sync), or allow ~2x the heartbeat
+interval. Note `pending_changes` already reports its own `in_sync: true` from
+integration bookkeeping, so the two entities visibly contradicted each other
+during the window, which is how this was found.
+
+
 ### A8. The panel-boundary dark band — OPEN, partially characterised
 
 A visible artefact at the ScreenID 0 / ScreenID 1 boundary on the 31.2" panel.
