@@ -120,11 +120,24 @@ class ParamControl:
 class CommandType:
     """``packet.CommandType`` (int32 -- the negative values are real).
 
-    ``packet.CommandType.String``, ``packet/command.go:47-95``.
+    ``packet.CommandType.String``, ``packet/command.go:47-95``, and the
+    identical v1 ``proto.CommandID.String``, ``proto/command.go:43-92``.
+
+    .. note::
+       ``0`` is **echo** and ``1`` is **reboot**, both in v1 and in v2.  An
+       earlier revision of this module had the two swapped, from a misread of
+       the v2 ``String`` chain; re-reading both jump chains byte by byte (they
+       reference the *same* two rodata strings, in the same order) and
+       disassembling the vendor's only reboot emitter --
+       ``networkmanager main.(*Panda).Reboot``, which writes
+       ``movabs $0x400000001`` into the command struct, i.e. ``Command = 1``
+       with a 4-byte payload -- settles it.  The mistake mattered: with the old
+       values, :meth:`~pyvisionect.session.DeviceConnection.reboot` would have
+       sent ``echo`` and an "echo" would have rebooted the sign.
     """
 
-    REBOOT = 0
-    ECHO = 1
+    ECHO = 0
+    REBOOT = 1
     CONFIGURATION = 2
     AT_COMMAND = 3
     SLEEP = 4
@@ -147,9 +160,15 @@ class CommandType:
     KEYBOARD = -3
     BEEP = -4
 
+    DISPLAY_ID = 15
+    """Not in either ``String`` chain (both print ``unknown`` for 15), but the
+    engine really does emit it: ``stdcmd.DisplayID.Done`` writes ``15`` with a
+    uint32 panel-type id in 1..10.  Do not send this; the wrong value selects
+    the wrong waveform."""
+
     NAMES: dict[int, str] = {
-        0: "reboot",
-        1: "echo",
+        0: "echo",
+        1: "reboot",
         2: "configuration",
         3: "AT command",
         4: "sleep",
@@ -250,7 +269,9 @@ CONNECT_REASON: dict[int, str] = {
 """Status tag 0. ``status.(*ConnectReason).String.jump5`` @ ``0x1adb940``.
 
 Note: the captured first-packet-after-connect carries 5, steady-state heartbeats
-carry 3.
+carry 3.  **[live]** ``2`` is what follows an ``app_wakeup`` out of deep sleep,
+and ``8`` is what the device sends in answer to a ``status request`` command
+(``CommandType 11``) -- both confirmed on hardware 2026-10-05.
 """
 
 ERROR_CODE: dict[int, str] = {
