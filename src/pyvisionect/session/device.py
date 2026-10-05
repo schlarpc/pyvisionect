@@ -37,6 +37,7 @@ __all__ = [
     "DeviceState",
     "DeviceStateStore",
     "RECTANGLE_UNSUPPORTED_HARDWARE",
+    "SCREEN_RECTANGLE_VERIFIED_HARDWARE",
     "SyncStatus",
 ]
 
@@ -117,6 +118,30 @@ full-screen.  Two further gates would stop partial updates anyway: the
 interlacing step needs exactly four rectangles of exactly 1440x640 with equal
 encoding, which small dirty rects can never satisfy, and ``noFullUpdateMax = 10``
 caps consecutive partials regardless.
+
+This set is about the **vendor server**.  For what the device itself accepts,
+see :data:`SCREEN_RECTANGLE_VERIFIED_HARDWARE`.
+"""
+
+SCREEN_RECTANGLE_VERIFIED_HARDWARE: frozenset[int] = frozenset({8})
+"""``HardwareNameID`` values **measured** accepting a screen-space partial.
+
+Note that this deliberately overlaps
+:data:`RECTANGLE_UNSUPPORTED_HARDWARE` rather than complementing it: the two
+sets answer different questions.  ``HardwareNameID 8`` is in both because the
+vendor's server would never send it a partial *and* the device takes one
+happily.
+
+Membership here means a physical device of that hardware class was driven with
+screen-addressed partial rectangles and acked them, drew only the addressed
+region, and echoed our state checksum back as ``DisplayStateCRC``.  For id 8
+that is the 31.2" Place&Play 32, firmware 7.4.4407, hardware revision 1.1.0,
+on 2026-10-05: 17 pushes, 17 acks, zero NACKs (``OPEN-QUESTIONS.md`` A10).
+
+It is a record of an experiment, not a capability advertisement.  A device
+does not tell us this about itself anywhere, so the only honest way to add an
+id is to point one at :class:`pyvisionect.imaging.DirtyTracker` and watch the
+glass.
 """
 
 
@@ -220,6 +245,38 @@ class DeviceState:
         if hw is None:
             return False
         return hw not in RECTANGLE_UNSUPPORTED_HARDWARE
+
+    @property
+    def accepts_screen_rectangles(self) -> bool:
+        """Whether **this device** was measured taking a partial rectangle.
+
+        The other half of the idea :attr:`supports_rectangles` used to carry
+        alone.  ``supports_rectangles`` answers "would the vendor stack ever
+        send one"; this answers "does the hardware take one".  For the 32"
+        sign the answers are **False and True** respectively, which is exactly
+        why they had to become two properties.
+
+        True for a ``HardwareNameID`` in
+        :data:`SCREEN_RECTANGLE_VERIFIED_HARDWARE`, and False until the device
+        has told us its hardware id -- the usual default, so nothing assumes a
+        capability before it has heard from the device.
+
+        What it unlocks is :mod:`pyvisionect.imaging.partial`: rectangles
+        addressed in **screen** coordinates, which never enter the interlaced
+        fold.  Canvas-space rectangles remain impossible on this hardware, and
+        :attr:`pyvisionect.imaging.Panel.forces_full_screen` still says so.
+
+        .. warning::
+           This is hand-measured on one device, not vendor-sanctioned, and it
+           buys **bytes and encode time, not refresh latency** (the panel's
+           waveform floor is ~2.9 s whatever the area).  Nothing in the
+           library turns partials on because of this property; it is here so a
+           caller can decide.
+        """
+        hw = self.hardware_name_id
+        if hw is None:
+            return False
+        return hw in SCREEN_RECTANGLE_VERIFIED_HARDWARE
 
     @property
     def features(self) -> dict[str, bool]:

@@ -44,7 +44,21 @@ from .constants import Encoding
 
 __all__ = ["INTERLACE_PAIRS", "interlace_4bpp", "deinterlace_4bpp",
            "interlace_1bpp", "deinterlace_1bpp", "interlace", "deinterlace",
-           "interlace_pairs"]
+           "interlace_pairs", "INTERLACE_GROUP", "SCREEN_X_QUANTUM",
+           "lane_span", "screen_span", "lane_of_display", "displays_of_screen"]
+
+
+#: Pixels per interleave group -- the "4-pixel granularity" of the fold.
+#: ``image_interlacing.go:43-46`` moves 2 bytes (4 pixels) of lane A, then 2 of
+#: lane B; the 1 bpp interleaver moves one nibble (4 pixels) at a time.  Both
+#: produce ``a[0:4], b[0:4], a[4:8], b[4:8], ...``.
+INTERLACE_GROUP = 4
+
+#: Screen-space x/width quantum: one lane group plus its partner's.  A screen
+#: rectangle whose ``x`` is not a multiple of this starts part-way into a group
+#: and the lanes come out swapped; one whose ``width`` is not a multiple of it
+#: ends mid-group and the packed lane rows stop being whole numbers of groups.
+SCREEN_X_QUANTUM = 2 * INTERLACE_GROUP
 
 
 #: ``{mode: ((screen_id, (lane_a_display, lane_b_display)), ...)}``
@@ -144,3 +158,87 @@ def deinterlace(data: bytes, encoding: int) -> tuple[bytes, bytes]:
     if encoding == Encoding.FOUR_BIT:
         return deinterlace_4bpp(data)
     raise ValueError(f"bad encoding {encoding!r}; only 1 and 4 exist (spec §2.1)")
+
+
+# --------------------------------------------------------------------------
+# sub-range geometry -- what a *partial* screen rectangle needs
+# --------------------------------------------------------------------------
+#
+# The fold is a pure permutation of columns, so it restricts to a sub-range.
+# Screen column ``s`` carries lane ``(s // INTERLACE_GROUP) % 2`` at lane
+# column ``(s // SCREEN_X_QUANTUM) * INTERLACE_GROUP + s % INTERLACE_GROUP``.
+# Inverting that for a whole number of *paired* groups:
+#
+#     lane columns [c0, c1)  <->  screen columns [2*c0, 2*c1)
+#
+# with ``c0`` and ``c1`` multiples of ``INTERLACE_GROUP``.  Which is why
+# :data:`SCREEN_X_QUANTUM` is 8 and not 4: 4 would address one lane's group
+# without its partner's, and there is no way to say that on the wire.
+
+
+def lane_span(screen_x: int, screen_width: int) -> tuple[int, int]:
+    """Lane-column range ``[c0, c1)`` covered by a screen-space x-range.
+
+    Both lanes of the screen cover the *same* lane columns -- that is the
+    whole reason a partial update has to carry the partner lane.
+
+    :raises ValueError: if ``screen_x`` or ``screen_width`` is not a multiple
+        of :data:`SCREEN_X_QUANTUM`, or either is negative.
+    """
+    if screen_x < 0 or screen_width < 0:
+        raise ValueError(f"negative screen x-range {screen_x}+{screen_width}")
+    if screen_x % SCREEN_X_QUANTUM or screen_width % SCREEN_X_QUANTUM:
+        raise ValueError(
+            f"screen x={screen_x} width={screen_width} must both be multiples "
+            f"of {SCREEN_X_QUANTUM} so the interleave lanes stay paired"
+        )
+    return (screen_x // 2, (screen_x + screen_width) // 2)
+
+
+def screen_span(lane_x: int, lane_width: int) -> tuple[int, int]:
+    """Inverse of :func:`lane_span`: ``(screen_x, screen_width)``.
+
+    :raises ValueError: if ``lane_x`` or ``lane_width`` is not a multiple of
+        :data:`INTERLACE_GROUP`, or either is negative.
+    """
+    if lane_x < 0 or lane_width < 0:
+        raise ValueError(f"negative lane x-range {lane_x}+{lane_width}")
+    if lane_x % INTERLACE_GROUP or lane_width % INTERLACE_GROUP:
+        raise ValueError(
+            f"lane x={lane_x} width={lane_width} must both be multiples of "
+            f"{INTERLACE_GROUP}, the interleave group"
+        )
+    return (lane_x * 2, lane_width * 2)
+
+
+def lane_of_display(mode: int, display: int) -> tuple[int, int]:
+    """``(screen_id, lane_index)`` carrying a logical display's band.
+
+    ``lane_index`` is ``0`` for lane A (the first half of each interleave
+    group) and ``1`` for lane B.  On mode 2, display 2 is **screen 1's lane
+    B** and display 3 is screen 1's lane A -- the swap.
+
+    :raises ValueError: if no screen carries that display.
+    """
+    for screen_id, lanes in interlace_pairs(mode):
+        for index, lane_display in enumerate(lanes):
+            if lane_display == display:
+                return (screen_id, index)
+    raise ValueError(
+        f"interlacing mode {mode} has no lane for display {display}"
+    )
+
+
+def displays_of_screen(mode: int, screen_id: int) -> tuple[int, int]:
+    """``(lane_a_display, lane_b_display)`` for a ``ScreenID``.
+
+    :raises ValueError: if the mode has no such screen.
+    """
+    for sid, lanes in interlace_pairs(mode):
+        if sid == screen_id:
+            return lanes
+    known = sorted(sid for sid, _ in interlace_pairs(mode))
+    raise ValueError(
+        f"interlacing mode {mode} has no ScreenID {screen_id}; known "
+        f"screens are {known}"
+    )

@@ -245,6 +245,66 @@ class Panel:
         return 2 if self.displays == 4 else 0
 
     @property
+    def screens(self) -> int:
+        """Number of *physical* panel channels the wire addresses.
+
+        Without interlacing this is just the logical display count: one
+        ``ScreenID`` per display.  With the mode-2 fold, two logical displays
+        share one physical ``2880 x 640`` channel, so it is ``displays // 2``.
+        """
+        return self.displays // 2 if self.interlace_mode else self.displays
+
+    @property
+    def screen_width(self) -> int:
+        """Width of one physical channel -- what ``RectangleHeader.X`` indexes.
+
+        ``2 x 1440 = 2880`` on the interlaced sign, because a screen row is
+        two logical displays' rows interleaved 4 pixels at a time.
+        """
+        return self.rotated_width * 2 if self.interlace_mode else self.rotated_width
+
+    @property
+    def screen_height(self) -> int:
+        """Height of one physical channel.  The fold is columns-only."""
+        return self.rotated_height
+
+    @property
+    def supports_screen_rectangles(self) -> bool:
+        """Whether a **screen-space** partial rectangle is expressible here.
+
+        This is the complement of :attr:`forces_full_screen`, which is about
+        *canvas*-space rectangles.  A canvas rectangle cannot survive the fold;
+        a screen rectangle never enters it.  See
+        :func:`pyvisionect.imaging.partial.encode_partial_frame`.
+
+        True only for interlacing mode 2 at rotation 0 on a greyscale driver:
+
+        * mode 1's lane pairing was never recovered (:data:`INTERLACE_PAIRS`),
+          so there is no map to address it with;
+        * mode 0 needs no screen-space path at all -- a canvas rectangle *is*
+          the wire rectangle there, and
+          :func:`~pyvisionect.imaging.encoder.encode_frame` already emits one;
+        * a rotated display would have to rotate each lane's sub-tile
+          independently and no rotated interlaced hardware exists to check it
+          against;
+        * colour-mask drivers are not implemented at all;
+        * and a logical display whose width is not a whole number of 4-pixel
+          interleave groups has no screen column range that covers a whole
+          number of lane groups, so there is nothing legal to address.
+
+        .. warning::
+           True here means "the library can build the bytes", **not** "your
+           device will draw them".  Only ``HardwareNameID 8`` hardware was
+           measured accepting these (``OPEN-QUESTIONS.md`` A10).
+        """
+        return (
+            self.interlace_mode == 2
+            and self.rotation == 0
+            and self.rotated_width % 4 == 0
+            and not self.driver.color_mask  # type: ignore[union-attr]
+        )
+
+    @property
     def forces_full_screen(self) -> bool:
         """True when every update must be a full-screen one.
 

@@ -214,12 +214,29 @@ class EncodedFrame:
     :param full_screen: whether this frame covers every display in full.  The
         caller needs it for the inverse-update rule (spec §1.4) and for the
         ``noFullUpdateCnt`` budget (spec §1.8).
+    :param screen_space: whether ``rectangles`` are addressed in **screen**
+        coordinates (one physical panel channel, 2880 wide on the 32" sign)
+        rather than in display-local ones.  Only
+        :func:`~pyvisionect.imaging.partial.encode_partial_frame` sets this.
+        It changes nothing about how the packet is marshalled -- a
+        ``RectangleHeader`` has always been screen-addressed -- but it tells a
+        decoder that ``w`` is *not* twice a logical display's width by
+        accident.
+    :param fallback_reason: when a partial update was asked for and a
+        full-screen one came back, the reason, in a short stable string.
+        ``None`` when nothing was downgraded.
+    :param dirty_rects: the **canvas**-space dirty rectangles this frame was
+        built from, for logging and tests.  Empty on a frame that was always
+        going to be full-screen.
     """
 
     rectangles: list[EncodedRect]
     state_checksum: int
     state: FrameState
     full_screen: bool = False
+    screen_space: bool = False
+    fallback_reason: Optional[str] = None
+    dirty_rects: tuple[Rect, ...] = ()
 
     #: ``ImageHeader.NrPrimitives`` (``image-state.go:1535``).
     @property
@@ -282,6 +299,9 @@ def encode_frame(
     bayer_matrix: Optional[np.ndarray] = None,
     blue_noise_matrix: Optional[np.ndarray] = None,
     dither_levels: Optional[int] = None,
+    partial: bool = False,
+    partial_policy: Any = None,
+    consecutive_partials: int = 0,
 ) -> EncodedFrame:
     """Encode one frame into wire-ready rectangles and a state checksum.
 
@@ -346,10 +366,50 @@ def encode_frame(
         to get identical output.
     :param dither_levels: force a level count (e.g. ``16`` to make ``bayer``
         multi-level at 4 bpp instead of the vendor's bi-level degeneration).
+    :param partial: **opt-in, per-device, not vendor-sanctioned.**  Encode the
+        dirty region only, as screen-space rectangles, by delegating to
+        :func:`pyvisionect.imaging.partial.encode_partial_frame`.  Off by
+        default, and with it off this function behaves exactly as it did
+        before this parameter existed.
+
+        .. warning::
+           Partial updates were verified by hand on **one** device --
+           ``HardwareNameID 8``-class hardware, the 31.2" Place&Play 32,
+           firmware 7.4.4407, hardware revision 1.1.0, on 2026-10-05
+           (``OPEN-QUESTIONS.md`` A10).  The vendor's own server never sends
+           this hardware a partial rectangle (``getRectangleSupport`` is false
+           for it unconditionally), so there is no vendor behaviour to match
+           and no vendor support to fall back on.  It saves **bytes and encode
+           time, not refresh latency**: the panel's waveform floor is ~2.9 s
+           whatever the rectangle's area.
+    :param partial_policy: a
+        :class:`pyvisionect.imaging.partial.PartialPolicy`, or ``None`` for
+        the default.  Only consulted when ``partial`` is true.
+    :param consecutive_partials: how many partial frames have gone out since
+        the last full-screen one, for the ghosting budget.  Only consulted
+        when ``partial`` is true; past
+        ``partial_policy.max_consecutive_partials`` the frame is promoted to
+        full screen.  :class:`pyvisionect.imaging.partial.DirtyTracker` keeps
+        this counter for you.
 
     :returns: an :class:`EncodedFrame`.  ``rectangles`` is empty when nothing
         changed.
     """
+    if partial:
+        from .partial import encode_partial_frame
+
+        return encode_partial_frame(
+            img, panel=panel, encoding=encoding, dithering=dithering,
+            rects=rects, prev_state=prev_state, inverse=inverse,
+            rect_options=rect_options, image_type=image_type,
+            rectangle_update_options=rectangle_update_options,
+            change_threshold=change_threshold, merge_regions=merge_regions,
+            max_regions=max_regions,
+            force_full_screen=force_full_screen, beautify=beautify,
+            beautify_gamma=beautify_gamma, bayer_matrix=bayer_matrix,
+            blue_noise_matrix=blue_noise_matrix, dither_levels=dither_levels,
+            policy=partial_policy, consecutive_partials=consecutive_partials,
+        )
     panel = Panel.adapt(panel)
     enc, dith = _validate(encoding, dithering, panel)
     grey = to_grey8(img)

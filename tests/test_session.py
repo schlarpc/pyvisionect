@@ -174,12 +174,16 @@ def test_device_capabilities_come_from_the_device_not_the_model() -> None:
     assert state.hardware_name_id == 8
     # HardwareNameID 8 -> getRectangleSupport is false unconditionally.
     assert state.supports_rectangles is False
+    # ...and the same device was measured accepting screen-space partials.
+    # The two properties disagree on purpose; see OPEN-QUESTIONS.md A10.
+    assert state.accepts_screen_rectangles is True
 
 
 def test_supports_rectangles_defaults_false_before_we_know() -> None:
     store = DeviceStateStore()
     state = store.get(UUID_A)
     assert state.supports_rectangles is False
+    assert state.accepts_screen_rectangles is False
 
 
 # -------------------------------------------------------------- dispatch

@@ -47,6 +47,17 @@ order, the 4-pixel interlace granularity, the screen-1 lane swap, the
 ``eink-flip`` mirror, the display stacking order and the XXHash32 state tag all
 at once -- see ``tests/imaging/test_golden_capture.py``.
 
+Partial updates are opt-in
+--------------------------
+:func:`encode_frame` always pushes the whole screen, which is what the vendor's
+server does on this hardware and what every captured frame shows.
+:mod:`pyvisionect.imaging.partial` adds a screen-space partial path --
+``encode_frame(..., partial=True)`` or
+:class:`~pyvisionect.imaging.partial.DirtyTracker` -- which saves ~250x on the
+wire and nothing at all on refresh latency.  It was verified by hand on one
+device and is **not** vendor-sanctioned; read that module's docstring before
+turning it on.
+
 Spec: ``artifacts/visionect/02-imaging-framebuffer.md``.
 """
 
@@ -65,11 +76,18 @@ from .encoder import EncodedFrame, EncodedRect, FrameState, encode_frame
 from .geometry import (mirror_image, rotate_image, translate_to_real,
                        translate_to_session, unrotate_image)
 from .grey import beautify, to_grey8
-from .interlace import (INTERLACE_PAIRS, deinterlace, deinterlace_1bpp,
-                        deinterlace_4bpp, interlace, interlace_1bpp,
-                        interlace_4bpp)
+from .interlace import (INTERLACE_GROUP, INTERLACE_PAIRS, SCREEN_X_QUANTUM,
+                        deinterlace, deinterlace_1bpp, deinterlace_4bpp,
+                        displays_of_screen, interlace, interlace_1bpp,
+                        interlace_4bpp, lane_of_display, lane_span,
+                        screen_span)
 from .pack import (pack, pack_1bpp, pack_4bpp, payload_size, unpack,
                    unpack_1bpp, unpack_4bpp)
+from .partial import (DirtyTracker, PartialPolicy, align_and_unite_screen_rects,
+                      align_screen_rect, canvas_regions_for_screen_rect,
+                      encode_partial_frame, encode_screen_rect,
+                      full_screen_cost, partial_cost, screen_bounds,
+                      screen_rects_for_canvas_rect, validate_screen_rect)
 from .panel import DRIVERS, PANEL_32INCH, DisplayGeometry, Driver, Panel
 from .rects import (Rect, align_to_quantum, apply_region_count_limit,
                     detect_changes, is_aligned, join_contours, limit_regions,
@@ -78,6 +96,10 @@ from .rects import (Rect, align_to_quantum, apply_region_count_limit,
 __all__ = [
     # the interface the rest of the library codes against
     "encode_frame",
+    # screen-space partial updates (opt-in; see pyvisionect.imaging.partial)
+    "encode_partial_frame",
+    "DirtyTracker",
+    "PartialPolicy",
     "decode_image_packet",
     "DecodedFrame",
     "EncodedFrame",
@@ -134,6 +156,21 @@ __all__ = [
     "interlace_4bpp",
     "deinterlace_4bpp",
     "INTERLACE_PAIRS",
+    "INTERLACE_GROUP",
+    "SCREEN_X_QUANTUM",
+    "lane_span",
+    "screen_span",
+    "lane_of_display",
+    "displays_of_screen",
+    "screen_bounds",
+    "screen_rects_for_canvas_rect",
+    "canvas_regions_for_screen_rect",
+    "align_screen_rect",
+    "align_and_unite_screen_rects",
+    "validate_screen_rect",
+    "encode_screen_rect",
+    "partial_cost",
+    "full_screen_cost",
     "translate_to_real",
     "translate_to_session",
     "rotate_image",
