@@ -766,13 +766,21 @@ and `QuantizeImage`'s histogram-derived palette is deliberately replaced with th
 uniform `n*17` wire ramp. Bayer is bi-level by default and warns at 4 bpp rather
 than inventing a 16-level bayer GM never produced.
 
-### C4. Full-pcap replay tests skip — PARTIAL
-2 tests skip unless the 1.9 MB pcap is present; the 93 KB extracted fixture
-carries the rest. Fine, but means the full-stream path is unexercised in CI.
+### C4. Full-pcap replay tests skip in CI — CLOSED, working as intended
 
----
+Not a gap. These two tests exist to re-verify the *extraction* against the
+**original, unmodified** capture, including the whole 1.84 MB image push. That
+purpose requires the original bytes, and the original bytes contain the owner's
+device UUID, WiFi SSID, BSSID and internal hostname -- which is exactly why the
+committed fixture is scrubbed.
 
-## D. Not yet built
+Bundling a scrubbed pcap would make the test verify nothing: it would be
+checking the extractor against bytes the extractor's own substitution rules
+produced. The ~90 KB fixture already covers the same decode/re-encode ground in
+CI; this pair is a local-only check that the fixture was derived faithfully.
+
+Correct behaviour is therefore: run when `PYVISIONECT_PCAP` (or the default
+path) points at a real capture, skip otherwise. Leave as is.
 
 ### D1. Home Assistant integration — BUILT, running
 Implemented and running against the live sign. Lives outside this repo (the
