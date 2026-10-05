@@ -73,15 +73,24 @@ descending order of how much they are relied on:
    heuristic in the chain, and it is the only one that can be wrong, so it is
    a plain editable tuple of regexes rather than something clever.
 
-**There may be a way to turn the log sink off at source**, which would make all
-of the above unnecessary: the firmware has a ``vlog_*`` family that sets per-
-source and per-destination log levels, and ``vlog_unify_levels <usb_level>``
-applies one level to every source on the USB destination.  But **which end of
-that scale is quiet is not known** -- the wrong argument would flood the port
-rather than silence it -- so it is an experiment, not a fix.  See
-:meth:`pyvisionect.io.usb.device.Sign.unify_usb_log_levels`, which spells out
-exactly what is and is not known and deliberately has no default argument.
-Until someone runs it, the four mechanisms above are what this module relies on.
+**The log sink can be turned off at source**, which makes all of the above
+unnecessary while it holds: ``vlog_unify_levels 1`` silences the USB
+destination.  Measured on 7.4.4407 -- 0 lines in 90 s, against 18-61 at level 5
+on a healthy link and ~1 400 lines/min at level 5 while the radio was
+reconnect-flapping -- and the lines it silences are exactly the heartbeat
+narration :data:`LOG_PATTERNS` exists to filter.  The scale runs ``1`` (quiet)
+to ``5`` (everything) and ``0`` is rejected outright, which is the answer to a
+question this docstring previously recorded as open.
+
+**It is still not a substitute for the four mechanisms above**, for one reason
+that is not about the logger: it does not persist.  Nothing survives without
+``flash_save``, and the sign reboots itself when it cannot reach its server
+(``E: Max conn errs. Reboot``), so a long-lived console session will silently
+get its default verbosity back partway through.  Treat ``vlog_unify_levels 1``
+as an optimisation for a known-quiet window, not as an invariant -- and note
+that it also hides ``E: TCP connection Error`` and friends, so level ``2`` or
+``3`` is the better choice if you still want to see faults.  See
+:meth:`pyvisionect.io.usb.device.Sign.silence_usb_logs`.
 
 One assumption remains: that the firmware emits whole log lines atomically, so
 an interloper never splits a reply line down the middle.  It held across every
@@ -687,10 +696,31 @@ class SerialConsole:
     def exists(self, command: str) -> bool:
         """Probe whether the firmware has *command*, by sending it bare.
 
-        Only safe for nullary getters: a setter sent bare may or may not be
-        rejected before it writes.  Prefer
-        :meth:`pyvisionect.io.usb.device.Sign.has` once ``help`` has been read,
-        which costs nothing and risks nothing.
+        The oracle: a command the firmware does not have answers
+        ``Command '<x>' not recognised.``, while one it *does* have but was
+        handed no arguments answers ``E: Invalid argument(s)`` or
+        ``Incorrect command parameter(s).``  That is how ``wifi_ssid_set`` was
+        shown to exist despite ``help`` never printing it, and how the 49
+        entries in :data:`~pyvisionect.io.usb.commands.PROBED_ABSENT_7_4_4407`
+        were shown not to.
+
+        .. danger::
+
+           **Only safe for a command that takes at least one required
+           argument.**  Argument validation then rejects the call before the
+           command body runs.  Sent bare, a *nullary* command is not rejected
+           -- it **executes**, and the nullary members of this firmware's
+           command set include ``fs_format``, ``cc3100_format``, ``scpu_reset``,
+           ``scpu_upgrade``, ``vcom_test`` and ``24aa256_test``.
+
+           So establish the arity from the vendor reference first and skip
+           anything you cannot establish.  Do not infer it from the name, and do
+           not trust this firmware's own ``help``, which lists
+           ``max17135_dump`` as nullary although it rejects a bare call.
+
+        Prefer :meth:`pyvisionect.io.usb.device.Sign.has` once ``help`` has been
+        read: it costs nothing and risks nothing.  Reach for this only to test
+        whether an *unlisted* command is nevertheless present.
         """
         result = self.command(command, raise_on_error=False)
         return not any(_UNKNOWN_RE.match(reply) for reply in result.lines)

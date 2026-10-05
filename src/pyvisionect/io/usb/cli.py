@@ -21,6 +21,7 @@ from .commands import (
     LISTED_BY_HELP,
     COMMANDS,
     DOCUMENTED_COUNT,
+    PROBED_ABSENT_7_4_4407,
     UNDOCUMENTED_IN_7_4_4407,
 )
 from .console import SerialConsole
@@ -158,7 +159,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(
             f"  {len(ABSENT_FROM_7_4_4407)} documented but not listed here "
-            f"(unprobed: help is not a complete index, so some may be hidden too)"
+            f"({len(PROBED_ABSENT_7_4_4407)} probed bare and genuinely absent; "
+            f"the other {len(ABSENT_FROM_7_4_4407) - len(PROBED_ABSENT_7_4_4407)} "
+            f"are unprobed -- help is not a complete index, so some may be hidden too)"
         )
         print(f"  {len(UNDOCUMENTED_IN_7_4_4407)} present but undocumented")
         print()

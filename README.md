@@ -379,7 +379,7 @@ plan.execute(Sign(console, allow_destructive=True))
 configuration are by default retained only in the working RAM."* Which cuts both
 ways: until it runs, a power-cycle undoes everything.
 
-#### `help` lists 111 of the 160 documented commands — and the firmware has 112
+#### `help` lists 111 of the 162 documented commands — and the firmware has 112
 
 Commands are compiled in behind switches, so the device in front of you is the
 only authority — but **`help` is not a complete index of it.** `wifi_ssid_set`
@@ -388,7 +388,10 @@ call returns `E: Invalid argument(s)`, where a command the firmware really lacks
 returns `Command '<x>' not recognised.` So there is a third category, *hidden*,
 and the delta is three sets in `pyvisionect.io.usb.commands` rather than two:
 `LISTED_BY_HELP` (111), `HIDDEN_IN_7_4_4407` (1) and `ABSENT_FROM_7_4_4407`
-(95, meaning **unlisted** — only one of them has ever been probed).
+(97, meaning **unlisted**). 49 of those 97 — every one the oracle can safely be
+pointed at — have since been probed and are genuinely absent
+(`PROBED_ABSENT_7_4_4407`), so `wifi_ssid_set` is a one-off rather than the tip
+of an iceberg, and the uncompiled hardware families really are uncompiled.
 
 Two findings change documented advice:
 
@@ -440,16 +443,22 @@ one is a heuristic:
 `CommandResult` carries `lines` (yours), `logs` (the firmware's) and `raw` (both,
 lossless). There is also an `on_log` callback and a `logs` history.
 
-There may be a way to turn the sink off at source. The firmware has a `vlog_*`
-family that sets log levels per *source* and per *destination* independently —
-logging is a matrix — and `vlog_unify_levels <usb_level>` applies one level to
-every source on the USB destination. But **which end of that scale is quiet is
-not known**, so the wrong argument floods the port instead of silencing it, and
-the command's own help line ("Reset logger levels to default for USB")
-contradicts its taking an argument at all. `Sign.unify_usb_log_levels(level)`
-exposes it with a mandatory argument and no default, and documents both
-readings. Until someone runs it, the four mechanisms above are what this module
-relies on.
+The sink can also be turned off at source. The firmware has a `vlog_*` family
+that sets log levels per *source* and per *destination* independently — logging
+is a matrix — and `vlog_unify_levels <usb_level>` applies one level to every
+source on the USB destination. The scale runs **1 (silent) to 5 (everything)**,
+and **`0` is not a valid level at all** — the firmware rejects it. So
+`vlog_unify_levels 1` silences the port, measured at 0 lines in 90 s against
+~1 400 lines/min at level 5 while the radio was flapping, and the command's own
+help line ("Reset logger levels to default for USB") is simply wrong.
+`Sign.silence_usb_logs()` is the shorthand; `Sign.unify_usb_log_levels(level)`
+keeps the mandatory argument, because a console driver wants 1 and someone
+debugging a dead link wants 3.
+
+It does **not** replace the four mechanisms above. Nothing persists without
+`flash_save`, and the sign reboots itself when it cannot reach its server
+(`E: Max conn errs. Reboot`), so the default verbosity comes back underneath a
+long-running session. It also hides the error lines along with the chatter.
 
 #### Line discipline, measured
 

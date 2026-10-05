@@ -3,13 +3,13 @@
 Why this table exists
 ---------------------
 
-The vendor's CLI reference documents **160** commands.  ``help`` on firmware
+The vendor's CLI reference documents **162** commands.  ``help`` on firmware
 7.4.4407 on a 32" system board prints **111** of them, and the firmware is known
 to answer **112**: ``wifi_ssid_set`` is present but unlisted.  Commands are
 compiled in behind switches (``USE_CC3100_DRIVER``, ``USE_RS9113_DRIVER``,
 ``USE_MMA7660_DRIVER``, ``USE_VPLATFORM_SCPU_EXT``, ...), so the device in front
 of you is the only authority -- but ``help`` is not a complete index of it, which
-is the single most important thing on this page.  The delta is not small: 95
+is the single most important thing on this page.  The delta is not small: 97
 documented commands are unlisted and 47 undocumented ones are printed.
 
 Two findings matter enough to call out:
@@ -22,6 +22,22 @@ Two findings matter enough to call out:
   Whether the console's parser will actually carry a space through it is a
   separate, **unverified** question -- see ``A2`` in ``OPEN-QUESTIONS.md`` and
   :func:`pyvisionect.io.usb.provisioning.plan_wifi`.
+* **...and exactly one.**  49 of the 97 unlisted commands have since been
+  probed by bare invocation on the device -- every one whose vendor-documented
+  arity includes a required argument, which is what makes the probe safe --
+  and **all 49 answered** ``Command '...' not recognised.``  So
+  ``wifi_ssid_set`` is a one-off and not the tip of an iceberg, and the whole
+  ``scpu_*``/``touch_*``/``mobile_*``/``frontlight_*`` story really is "not
+  compiled into this build".  See :data:`PROBED_ABSENT_7_4_4407` for the list
+  and ``A1`` in ``OPEN-QUESTIONS.md`` for the method and the 48 still unprobed.
+
+Note that the existence oracle has **two** positive spellings, not one.  A
+present-but-misinvoked command answers either ``E: Invalid argument(s)`` (the
+``wifi_*`` and ``vlog_*`` setters) or ``Incorrect command parameter(s).`` (the
+``vlog_*`` family on a bare call).  Only ``Command '...' not recognised.``
+means the firmware does not have it.  Matching on the error *prefix* is not
+enough: the firmware also emits unsolicited ``E: ...`` log lines such as
+``E: TCP connection Error: -111``, so a probe has to match the full string.
 * **``flash_print`` is not listed**, although the reverse engineering notes call
   it "the single highest-value command" for dumping every stored setting.  There
   is no *known* single-command settings dump here; the per-area getters are the
@@ -90,15 +106,77 @@ __all__ = [
     "DOCUMENTED_COUNT",
     "HARD_COMMANDS",
     "Kind",
+    "PROBED_ABSENT_7_4_4407",
     "READ_COMMANDS",
     "TCLV_FOR",
     "UNDOCUMENTED_IN_7_4_4407",
+    "VLOG_DESTINATIONS",
+    "VLOG_LEVELS",
+    "VLOG_QUIET",
+    "VLOG_VERBOSE",
     "Command",
     "lookup",
 ]
 
-DOCUMENTED_COUNT = 160
-"""Commands in the vendor's published CLI reference."""
+DOCUMENTED_COUNT = 162
+"""Commands in the vendor's published CLI reference.
+
+Counted off the page itself (one ``<h*>`` section per command) rather than by
+hand: it is **162**, not the 160 this module claimed until 2026-10-05.  The two
+that were missed are ``rs9110_scan`` and ``rs9113_scan``, which were absent from
+:data:`ABSENT_FROM_7_4_4407` as well, so both counts moved together.
+"""
+
+VLOG_LEVELS: range = range(1, 6)
+"""Valid ``<level>`` arguments for every ``vlog_*`` setter: **1 to 5**.
+
+Measured, not inferred.  All three of ``vlog_unify_levels``,
+``vlog_set_source_level`` and ``vlog_set_destination_level`` answer
+``E: Invalid argument(s)`` to ``-1``, ``0``, ``6``, ``99`` and a non-numeric
+argument, and accept 1..5 silently.
+
+**``0`` is not a valid level.**  That retires the question ``A3`` was built on
+("does 0 mean emit nothing or emit everything?") -- it means neither, because
+the firmware rejects it.
+"""
+
+VLOG_QUIET: int = 1
+"""The silent end of :data:`VLOG_LEVELS`.
+
+``vlog_unify_levels 1`` reduces the USB log stream to nothing: 0 lines in 90 s,
+and 0/0/1 lines across three ``pss``-triggered trials, against 18-61 lines per
+90 s at level 5 on a healthy link and ~1 400 lines/min while the radio was
+flapping.  Verified in four separate runs on 2026-10-05, including one with the
+level order reversed.  See :data:`VLOG_VERBOSE` and
+:meth:`pyvisionect.io.usb.device.Sign.unify_usb_log_levels`.
+"""
+
+VLOG_VERBOSE: int = 5
+"""The loud end of :data:`VLOG_LEVELS`: everything, including image and frame detail.
+
+Levels are a severity threshold and the scale is ordered quiet-to-loud.  Level 1
+emits nothing; 2 and 3 emit only ``E:`` error lines; 4 adds the informational
+state narration (``From state N going to state N``, ``New connectivity state``,
+DHCP/IP/DNS); 5 adds debug detail (``Frame send N bytes``, ``Image transfer
+pending``, ``EPD temperature``).
+"""
+
+VLOG_DESTINATIONS: range = range(0, 9)
+"""Valid ``<destination>`` ids for ``vlog_set_destination_level``: **0 to 8**.
+
+The firmware validates this one -- ``-1``, ``9``, ``16``, ``100``, ``255`` and
+``9999`` are all refused -- so there are exactly nine sinks.  Which id is the
+USB UART was **not** established; see ``A3`` in ``OPEN-QUESTIONS.md``.
+
+.. warning::
+
+   ``vlog_set_source_level`` validates its *level* but **not** its *source id*.
+   ``-1``, ``14``, ``32``, ``100``, ``255`` and ``9999`` are all accepted
+   silently, so there is no way to enumerate the source namespace by probing and
+   an out-of-range id is an unchecked index into firmware state.  Validate it
+   caller-side; :meth:`pyvisionect.io.usb.device.Sign.set_log_source_level`
+   does.
+"""
 
 
 class Kind(str, Enum):
@@ -300,9 +378,11 @@ _ABSENT = (
     'rs9110_fw_version',
     'rs9110_mac_address',
     'rs9110_rssi',
+    'rs9110_scan',
     'rs9113_fw_version',
     'rs9113_mac_address',
     'rs9113_rssi',
+    'rs9113_scan',
     'scpu_config_get',
     'scpu_config_save',
     'scpu_config_set',
@@ -367,6 +447,63 @@ _ABSENT = (
     'touch_sr_set',
     'touch_test',
     'vcom_test',
+)
+
+# Probed by bare invocation on 7.4.4407 on 2026-10-05 and answered
+# `Command '<x>' not recognised.` -- i.e. genuinely not in the firmware, not
+# merely unlisted.  Every one of these takes at least one required argument in
+# the vendor reference, which is what made the probe safe: argument validation
+# rejects the call before the command body runs.  See PROBED_ABSENT_7_4_4407.
+_PROBED_ABSENT = (
+    'accelerometer_conf_set',
+    'bq24023_mode_set',
+    'cc3100_pwr',
+    'ext_conf_get',
+    'ext_conf_set',
+    'frontlight_conf_ldr_set',
+    'frontlight_conf_pwm_set',
+    'frontlight_conf_set',
+    'heater_conf_set',
+    'mobile_apn_set',
+    'mobile_conf_set',
+    'mobile_password_set',
+    'mobile_security_set',
+    'mobile_username_set',
+    'roaming_conf_set',
+    'scpu_dev_batt_thr',
+    'scpu_dev_ctl',
+    'scpu_dev_mode',
+    'scpu_dev_toff_max',
+    'scpu_dev_toff_min',
+    'scpu_fl_ctl',
+    'scpu_fl_ldr_set',
+    'scpu_fl_mode',
+    'scpu_fl_postf',
+    'scpu_fl_pref',
+    'scpu_fl_pwm_set',
+    'scpu_fl_pwmf',
+    'scpu_fl_pwmlim',
+    'scpu_fl_senst',
+    'scpu_fl_sr',
+    'scpu_ht_mode',
+    'scpu_ht_toff',
+    'scpu_ht_ton',
+    'scpu_power',
+    'scpu_psu_dev_ctl',
+    'scpu_psu_dev_mode',
+    'scpu_psu_disp_ctl',
+    'scpu_psu_power',
+    'scpu_psu_rail_level',
+    'scpu_psu_sleep_mode',
+    'scpu_sleep_mode',
+    'sim5320_gps_sw',
+    'sim5320_power_cmd',
+    't2s_config_set',
+    'touch_hw_pwr',
+    'touch_palm_set',
+    'touch_pwr_set',
+    'touch_sens_set',
+    'touch_sr_set',
 )
 
 _UNDOCUMENTED = (
@@ -447,26 +584,49 @@ UART) and does not act on it.
 ABSENT_FROM_7_4_4407: frozenset[str] = frozenset(_ABSENT)
 """Documented by the vendor but **not listed by this firmware's** ``help``.
 
-.. warning::
+Membership here means "absent from ``help``", which is not automatically the
+same as "absent from the firmware" -- ``wifi_ssid_set`` was in this set until a
+bare invocation proved it present.  **49 of these 97 have since been probed and
+are genuinely absent** (:data:`PROBED_ABSENT_7_4_4407`); the remaining 48 are
+still only "unlisted".
 
-   Membership here means "absent from ``help``", which is **not** the same as
-   "absent from the firmware". ``wifi_ssid_set`` was in this set until a bare
-   invocation answered ``E: Invalid argument(s)`` rather than
-   ``Command '...' not recognised.`` -- i.e. it is a *hidden* command, present
-   and working. The rest of this set has not been probed that way, so treat it
-   as "unlisted", not "unavailable".
+.. warning::
 
    The probe is safe only for commands taking at least one **required**
    argument, because argument validation then rejects the call before anything
    happens. A bare call to a *nullary* command (``fs_format``, ``scpu_reset``,
-   ``cc3100_format``, ``scpu_upgrade``) would **execute** it.
+   ``cc3100_format``, ``scpu_upgrade``) would **execute** it.  That is why the
+   48 unprobed entries stay unprobed: 39 of them are nullary in the vendor
+   reference, 4 have an arity the reference and the field notes disagree about
+   (``vcom_test``, ``touch_test``, ``scpu_reset``, ``scpu_psu_reset``), 3 flash
+   firmware, and ``t2s_speak`` would make noise if its documented arity is
+   wrong.
 
-The 95 entries are mostly whole hardware families that were not compiled in:
+The 97 entries are mostly whole hardware families that were not compiled in:
 every ``scpu_*`` (sensor/front-light co-processor), ``touch_*`` calibration,
 ``t2s_*`` text-to-speech, ``frontlight_*``, ``heater_*``, ``mobile_*``,
 ``rs911x_*`` (the other radio), ``sim5320_*`` (cellular).  Plus three one-offs
 worth knowing about: ``flash_print``, ``fw_checksum_get`` and
 ``accelerometer_conf_get``/``_set``.
+"""
+
+PROBED_ABSENT_7_4_4407: frozenset[str] = frozenset(_PROBED_ABSENT)
+"""The subset of :data:`ABSENT_FROM_7_4_4407` **proven** absent on the device.
+
+Each of these 49 was sent bare to firmware 7.4.4407 on 2026-10-05 and answered
+``Command '<x>' not recognised.``  That is the negative arm of the same oracle
+that proved ``wifi_ssid_set`` present, so these are not inferences from ``help``
+-- the firmware was asked directly and said no.
+
+The oracle was validated in the same session, before, between and after the
+batch: a bare ``wifi_ssid_set`` answered ``E: Invalid argument(s)`` every time
+and a nonsense name answered ``not recognised`` every time, so a false
+"absent" would have had to survive a working positive control.
+
+**Nothing new was found hidden.**  The practical upshot is that
+:data:`HIDDEN_IN_7_4_4407` is a set of one on this firmware, and the hardware
+families in the unlisted set are genuinely not compiled into this build -- so
+the library is not refusing capabilities the device actually has.
 """
 
 UNDOCUMENTED_IN_7_4_4407: frozenset[str] = frozenset(_UNDOCUMENTED)
@@ -509,8 +669,14 @@ HIDDEN_IN_7_4_4407: frozenset[str] = frozenset({"wifi_ssid_set"})
 
 Found by bare invocation: a hidden command answers ``E: Invalid argument(s)``
 while a genuinely missing one answers ``Command '...' not recognised.``.
-Only ``wifi_ssid_set`` has been probed so far; the rest of
-:data:`ABSENT_FROM_7_4_4407` is unverified and may well contain more of these.
+
+**Still a set of one, and now on evidence rather than for want of looking.**
+49 of the 97 unlisted commands -- every one the oracle can safely be pointed at
+-- were probed on 2026-10-05 and all 49 were genuinely absent
+(:data:`PROBED_ABSENT_7_4_4407`).  The 48 that remain unprobed are nullary,
+firmware-flashing, or of disputed arity, so this set could still grow, but not
+by much and not cheaply: ``flash_print`` is the one worth wanting and it is
+exactly the kind the oracle cannot touch.
 """
 
 #: Commands this firmware's ``help`` actually prints.
@@ -520,8 +686,17 @@ assert len(LISTED_BY_HELP) == 111, f"help on 7.4.4407 lists 111, got {len(LISTED
 assert len(COMMANDS) == 111 + len(HIDDEN_IN_7_4_4407)
 assert HIDDEN_IN_7_4_4407 <= frozenset(COMMANDS)
 assert not (HIDDEN_IN_7_4_4407 & ABSENT_FROM_7_4_4407), "a hidden command is not absent"
-assert len(ABSENT_FROM_7_4_4407) == 95
+assert len(ABSENT_FROM_7_4_4407) == 97
 assert len(UNDOCUMENTED_IN_7_4_4407) == 47
+assert len(PROBED_ABSENT_7_4_4407) == 49
+assert PROBED_ABSENT_7_4_4407 <= ABSENT_FROM_7_4_4407, "probed-absent is a subset of unlisted"
+assert PROBED_ABSENT_7_4_4407.isdisjoint(COMMANDS), "proven absent, so not in the table"
+# Documented = present-and-documented + unlisted. Keeps the three counts in step:
+# this is the arithmetic that was wrong while DOCUMENTED_COUNT said 160.
+assert (
+    len(frozenset(COMMANDS) - UNDOCUMENTED_IN_7_4_4407) + len(ABSENT_FROM_7_4_4407)
+    == DOCUMENTED_COUNT
+)
 
 READ_COMMANDS: frozenset[str] = frozenset(
     name for name, c in COMMANDS.items() if c.kind is Kind.READ

@@ -13,26 +13,86 @@ Status key: **OPEN** (not started) · **BLOCKED** (needs something we lack) ·
 The sign is reachable over USB serial, so these are cheap right now. Nothing
 persists without `flash_save`, which makes almost all of them reversible.
 
-### A1. Probe the 95 "unlisted" commands for more hidden ones — OPEN
-`ABSENT_FROM_7_4_4407` was built by diffing the device's `help` against the
-vendor reference. The method is **unsound**: `wifi_ssid_set` was in that set and
-is in fact present, merely unlisted.
+### A1. Probe the "unlisted" commands for more hidden ones — **ANSWERED: there are none reachable** (2026-10-05)
 
-Bare invocation is an existence oracle:
+**49 probed, 49 genuinely absent, 0 new hidden commands.** `wifi_ssid_set` is a
+one-off, not the tip of an iceberg, and the library is **not** refusing
+capabilities this device actually has.
+
+`ABSENT_FROM_7_4_4407` was built by diffing the device's `help` against the
+vendor reference, and the method is **unsound**: `wifi_ssid_set` was in that set
+and is in fact present, merely unlisted. Bare invocation is an existence oracle:
 
 | response | meaning |
 |---|---|
 | `E: Invalid argument(s)` | present, hidden |
+| `Incorrect command parameter(s).` | present, hidden (the `vlog_*` spelling) |
 | `Command '<x>' not recognised.` | genuinely absent |
+
+Note the oracle has **two** positive spellings, which was not known before. And
+matching on the `E:` prefix alone is not sound: the firmware emits unsolicited
+`E: ...` log lines too (`E: TCP connection Error: -111`), so a probe has to
+match the full string. This probe did.
 
 > **Only safe for commands with a required argument.** A bare call to a
 > *nullary* command (`fs_format`, `cc3100_format`, `scpu_reset`, `scpu_upgrade`)
 > **executes** it. Filter by arity from the vendor reference first; skip unknown
 > arity. This is the same class of mistake as allow-listing `sf_rdid` (A6).
 
-Payoff: whole families (`touch_*`, `frontlight_*`, `scpu_*`) are presumed absent
-on hardware that may support them. Each hidden command is a capability the
-library currently refuses to use.
+#### What was probed, and how the candidates were chosen
+
+Arity came from the vendor page's own per-command **Syntax** row, parsed out of
+the HTML rather than read off a summary — 162 sections, one per command. Two
+cross-checks mattered:
+
+* `touch_hw_pwr`'s Syntax row is **corrupt** on the vendor page (it repeats the
+  description). Its **Parameters** table names a required `enable`, which is the
+  independent second source that let it be probed.
+* Every other command's Syntax row and Parameters table agree.
+
+| disposition | n | reason |
+|---|---:|---|
+| **probed** | **49** | ≥1 required argument in the vendor reference |
+| skipped | 39 | nullary — a bare call would *execute* it |
+| skipped | 4 | arity disputed: `vcom_test`, `touch_test`, `scpu_reset`, `scpu_psu_reset` (reference says 1 arg, field notes say nullary-and-destructive) |
+| skipped | 3 | flashes firmware: `scpu_upgrade`, `scpu_psu_upgrade`, `touch_fw_update` |
+| skipped | 1 | `t2s_speak` — would speak aloud if the documented arity is wrong |
+
+All 49 answered `Command '<x>' not recognised.` The 49 are recorded as
+`PROBED_ABSENT_7_4_4407`, kept **separate** from `ABSENT_FROM_7_4_4407` so that
+"proven absent" and "merely unlisted" never merge back into one idea.
+
+#### Why the negative is trustworthy
+
+A negative result from an oracle is only as good as the oracle. It was validated
+three times in the same session, in the same code path:
+
+* **before** the batch — `wifi_ssid_set` → `E: Invalid argument(s)`, a nonsense
+  name → `not recognised`;
+* **after** the batch — both again, plus a resample of 6 of the 49, all
+  reproducing;
+* and the captured `help` was re-parsed and matched `LISTED_BY_HELP` exactly
+  (111 names, with `wifi_ssid_set` confirmed absent from it).
+
+So a false "absent" would have had to survive a working positive control on
+either side of it.
+
+#### The 48 that remain, and why they stay that way
+
+They are not unprobed through haste — the oracle cannot safely be pointed at
+them. The loss that matters is **`flash_print`**, the single highest-value
+command for dumping stored settings, and it is nullary: a bare call runs it.
+Settling it needs a different method (a firmware-side look, or accepting that
+running it is harmless — it only prints). `fw_checksum_get` and
+`accelerometer_conf_get` are in the same position.
+
+#### Incidental finding: the documented count was wrong
+
+The vendor page documents **162** commands, not 160. `rs9110_scan` and
+`rs9113_scan` were missing from `DOCUMENTED_COUNT` *and* from
+`ABSENT_FROM_7_4_4407`, so the books were out by two at both ends and still
+looked self-consistent. `commands.py` now asserts the arithmetic
+(`present-and-documented + unlisted == documented`) so that cannot recur.
 
 ### A2. Can an SSID contain spaces? — OPEN (unblocked by A1's finding)
 `wifi_ssid_set` takes the **SSID alone**, no PSK, so this needs no credentials.
@@ -45,12 +105,94 @@ Until then `plan_wifi` and `Sign.set_wifi` still refuse a spaced SSID, but the
 refusal now says the route exists and is untested rather than claiming it is
 impossible. Settling this is a one-line change to `plan_wifi`.
 
-### A3. `vlog_unify_levels` — which end of the scale is quiet? — OPEN
-`0` could mean "emit nothing" or "emit everything"; nothing observed
-distinguishes them, and the help line ("Reset ... to default") contradicts its
-own `<usb_level>` signature. Run it with a capture going and see whether the
-heartbeat burst stops or multiplies, then `vlog_set_default_levels`. Until then
-`unify_usb_log_levels()` takes a mandatory argument and promises nothing.
+### A3. `vlog_unify_levels` — which end of the scale is quiet? — **ANSWERED: 1 is quiet, and 0 is not a level at all** (2026-10-05)
+
+The question was *"does `0` mean emit nothing or emit everything?"* It means
+**neither**. The firmware answers `E: Invalid argument(s)` to `0` — and to `-1`,
+`6`, `99` and anything non-numeric. **The valid range is 1–5**, on all three of
+`vlog_unify_levels`, `vlog_set_source_level` and `vlog_set_destination_level`.
+Five levels, matching the five `[DIWEF]` severities. So the premise was wrong,
+and the honest headline is that the old API invited callers to pass the one
+value the device refuses.
+
+**Level 1 is silent. Level 5 is everything.** The help line ("Reset logger
+levels to default for USB") is simply wrong: the command uses its argument, and
+`vlog_set_default_levels` is the one that resets.
+
+| level | what reaches the USB UART |
+|---|---|
+| 1 | nothing |
+| 2, 3 | `E:` error lines only |
+| 4 | + state narration (`From state N going to state N`, `New connectivity state`, DHCP/IP/DNS) |
+| 5 | + debug detail (`Frame send N bytes`, `Image transfer pending`, `EPD temperature`) |
+
+#### The measurements, and the two confounds that had to be beaten
+
+| run | method | level 1 | level 5 |
+|---|---|---:|---:|
+| 1 | passive, interleaved 90 s × 2 each | **1 line / 180 s** | 4 099 lines / 180 s |
+| 2 | passive sweep 1–5, 45 s each | *(polluted by a reboot)* | 213/min |
+| 3 | `pss`-triggered, 3 rounds, order reversed on round 2 | **0, 0, 1** | 57, 31, 52 |
+| 4 | passive 90 s, 5→1→5 | **0 lines / 90 s** | 18 and 61 lines / 90 s |
+
+Two things made this harder than it looks, and both are worth recording because
+they would catch the next person:
+
+1. **The passive rate is not a stable baseline.** The sign deep-sleeps between
+   heartbeats, so a short window either catches a burst or does not — and an
+   *asleep* sign narrates nothing at any level, which zeroed a whole round. The
+   fix was a deterministic stimulus: `pss` (ACTION tier) makes the sign emit a
+   status packet on demand, and counting the lines *it* produces is immune to
+   both. `app_wakeup` first makes the awake state deterministic too.
+2. **A concurrent agent was pushing images**, and the sign's own reboots
+   injected boot banners mid-window. Interleaving the levels (and reversing the
+   order on one round) is what stops a drifting background rate masquerading as
+   a result.
+
+The level 2-vs-3 ordering looks non-monotonic (12.0 vs 3.3 lines mean) and is
+not: level 2's count is dominated by an `E: TCP connection Error: -111` retry
+storm, which is an artifact of the sign's server being unreachable at the time,
+not a property of the scale.
+
+#### Does it suppress the interleaving `console.py` works around? Yes — conditionally
+
+Yes: at level 1 the port goes to ~0 lines, and the lines it silences are
+*exactly* the heartbeat narration `LOG_PATTERNS` exists to filter
+(`sys evt vplatform_heartbeat.c:19, Heartbeat (7)`, `Received event: Heartbeat
+(7)`, `Heart-beat event`). But it is **not** a replacement for the four
+mechanisms, for two reasons:
+
+* **It does not persist, and the sign un-does it by itself.** Nothing survives
+  without `flash_save`, and the sign reboots when it cannot reach its server —
+  observed directly, with the firmware stating the reason: `E: Max conn errs.
+  Reboot`. A long-lived console session will silently get default verbosity back
+  partway through. Re-apply after any reconnect; never assume it is in force.
+* **It hides the diagnostics too.** Level 1 also suppresses
+  `E: TCP connection Error`, often the only indication the far end is dead.
+  **Level 2 or 3 is the better choice** for a quiet port that still reports
+  faults — that is the recommendation for anyone driving the console
+  programmatically.
+
+#### The two-axis model — half characterised, and one real hazard
+
+* **Nine destinations, ids 0–8.** The firmware range-checks this argument:
+  `-1`, `9`, `16`, `100`, `255`, `9999` are all refused.
+* **The source id is not range-checked at all.** `-1`, `14`, `32`, `100`, `255`
+  and `9999` are *accepted silently*. So the source namespace cannot be
+  enumerated by probing, and an out-of-range id is an unchecked index into
+  firmware state. `set_log_source_level` now refuses a negative source on its
+  own authority, because the device will not. **This is the one place the
+  library is deliberately stricter than the firmware.**
+* **Which destination id is the USB UART is still unknown — INCONCLUSIVE.** Two
+  attempts failed, and the reason is informative: the verbose output at levels
+  4–5 is mostly *network state-machine churn*, so once the sign's link went
+  stable there was nothing left to narrate and the control condition collapsed
+  to 1–2 lines. Identifying it needs a stimulus that provokes narration
+  independent of link state. Recorded as unfinished rather than guessed at.
+
+API now: `unify_usb_log_levels(level)` validates 1–5 and keeps its mandatory
+argument (a console driver wants 1, someone debugging a dead link wants 3);
+`silence_usb_logs()` is the shorthand for the quiet end.
 
 ### A4. TLS on port 11113 — OPEN
 `ProtocolHeader` sniffing shares the port with plaintext; the vendor peeks 6
@@ -462,11 +604,27 @@ Note `cs 3` ("Connect to server") forces a reconnect without a reboot, so the
 restore needs no `flash_save` at all — that is the better path, and would have
 avoided persisting anything in the first place.
 
-### E2. The firewall rule is temporary — OPEN
+### E2. The firewall rule is temporary — OPEN, and the failure mode is now confirmed
 Port 11113 was opened with `nixos-firewall-tool`, which does not survive a
 reboot, while E1 *does*. If the host reboots before E1 is restored, the sign has
 nowhere to report — likely the reported beeping. Either restore E1 or make the
 rule declarative.
+
+**Observed live on 2026-10-05**, incidentally, while running A3: with nothing
+listening on `10.42.0.50:11113` the sign logs
+`E: Opening TCP socket` / `E: TCP connection Error: -111` in a retry loop,
+`NETWORK_ERROR_COUNT` climbs, and **the firmware reboots itself** — stating the
+reason outright:
+
+```
+E: Max conn errs. Reboot
+```
+
+So the consequence of E1+E2 drifting apart is not just "no updates": it is a
+sign that power-cycles itself every few hours. Two reboots were seen in about
+40 minutes. `ERROR_CODE` stayed `0x0` throughout, so **the status packet does
+not report this** — the only indication is the serial log at level 2 or above,
+which is an argument for not running the console at `vlog_unify_levels 1` (A3).
 
 ### E3. The listener is a user unit, not declarative — OPEN
 `~/.config/systemd/user/pyvisionect-listener.service` with lingering enabled, run

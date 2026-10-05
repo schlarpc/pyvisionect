@@ -106,23 +106,40 @@ with `echo`/`reboot` once you have determined which is which.
 These are cheap — the serial console is reachable whenever a cable is, and nothing persists
 without `flash_save`, which makes almost all of them reversible.
 
-### Probe the unlisted commands for more hidden ones — OPEN
+### Probe the unlisted commands for more hidden ones — ANSWERED for 49 of 97, 48 unreachable
 
 The present/absent split was built by diffing `help` against the vendor reference, and the
-method is **unsound**: one documented command turned out to be present but merely unlisted.
-So 95 commands are *presumed* absent on the strength of a method already known to be wrong
-once.
+method is **unsound**: one documented command (`wifi_ssid_set`) turned out to be present but
+merely unlisted. So 97 commands were *presumed* absent on the strength of a method already
+known to be wrong once.
 
 The [existence oracle](usb-cli.md#the-existence-oracle) settles each one in one round trip.
 
 > **Only safe for commands with a required argument.** A bare call to a **nullary** command
 > **executes** it. Filter by arity from the vendor reference first; skip unknown arity.
 
-Payoff: whole families (`touch_*`, `frontlight_*`, `scpu_*`) are presumed absent on
-hardware that may well support them. Each hidden command is a capability a reimplementation
-is currently refusing to use. And the one question nothing else can answer is whether an
-**undocumented memory or flash read** exists — see
+**Result (7.4.4407, 2026-10-05): 49 probed, 49 genuinely absent, no new hidden commands.**
+Those 49 are every unlisted command the vendor reference gives a required argument, less the
+ones that flash firmware and the four whose arity the sources disagree about. All answered
+`Command '<x>' not recognised.` The oracle was validated before, between and after the batch
+with a known-present control and a nonsense name, so a false "absent" would have had to
+survive a working positive control.
+
+So the uncompiled hardware families (`touch_*`, `frontlight_*`, `scpu_*`, `mobile_*`,
+`rs911x_*`, `sim5320_*`, `t2s_*`) really are uncompiled, and a reimplementation is **not**
+refusing capabilities the device has. `wifi_ssid_set` is a one-off.
+
+**The 48 still unprobed are unprobed on purpose**, and the oracle cannot reach them: 39 are
+nullary in the vendor reference, 3 flash firmware, 4 have a disputed arity (`vcom_test`,
+`touch_test`, `scpu_reset`, `scpu_psu_reset`), and `t2s_speak` would speak if its documented
+arity is wrong. That set includes `flash_print` — the single highest-value command and
+exactly the kind a bare call would simply *run*. The one question nothing else can answer is
+whether an **undocumented memory or flash read** exists — see
 [firmware.md](firmware.md#where-the-key-is-not).
+
+Incidental finding: the vendor's page documents **162** commands, not the 160 previously
+counted. `rs9110_scan` and `rs9113_scan` were missing from both the documented total and the
+unlisted set, so the books were out by two at each end and still looked self-consistent.
 
 ### Can an SSID contain a space? — OPEN
 
@@ -135,12 +152,38 @@ the line.
 Until it is settled, a provisioning tool should **say the route exists and is untested**
 rather than claiming a spaced SSID is impossible.
 
-### `vlog_unify_levels`: which end of the scale is quiet? — OPEN
+### `vlog_unify_levels`: which end of the scale is quiet? — ANSWERED: 1 is quiet, and 0 is not a level
 
-`0` could mean "emit nothing" or "emit everything", and the command's own help line
-contradicts its taking an argument at all. Run it with a capture going and see whether the
-heartbeat burst stops or multiplies, then restore the defaults. Getting this right would
-remove the need for the log/reply demultiplexer's one heuristic.
+The question assumed `0` meant either "emit nothing" or "emit everything". It means
+**neither**: the firmware answers `E: Invalid argument(s)` to `0`, and to `-1`, `6`, `99`
+and anything non-numeric. **The valid range is 1–5**, on all three of `vlog_unify_levels`,
+`vlog_set_source_level` and `vlog_set_destination_level` — five levels, matching the five
+`[DIWEF]` severities.
+
+**Level 1 is silent, level 5 is everything.** Measured four ways on 2026-10-05, including
+one run with the level order reversed: 0 lines in 90 s at level 1, against 18–61 per 90 s at
+level 5 on a healthy link and ~1 400 lines/min at level 5 while the radio was
+reconnect-flapping. By line kind — 1 emits nothing; 2–3 only `E:` error lines; 4 adds state
+narration (`From state N going to state N`, DHCP/IP/DNS); 5 adds debug detail (`Frame send N
+bytes`, image transfer, EPD temperature). The command's own help line ("Reset logger levels
+to default for USB") is wrong: it uses its argument, and `vlog_set_default_levels` is the
+one that resets.
+
+**It does remove the need for the demultiplexer's heuristic — but only inside a window you
+control.** Nothing persists without `flash_save`, and the sign reboots itself when it cannot
+reach its server (`E: Max conn errs. Reboot`), restoring default verbosity mid-session. It
+also hides `E: TCP connection Error` along with the chatter, so level 2 or 3 is the better
+choice for a quiet port that still reports faults.
+
+**The two-axis model is only half characterised.** There are exactly **nine destinations**,
+ids 0–8: the firmware range-checks that argument and refuses `-1` and `9` upward. It does
+**not** range-check the *source* id — `-1`, `32` and `9999` are all accepted silently — so
+the source namespace cannot be enumerated by probing, and an out-of-range id is an unchecked
+index into firmware state. **Which destination id is the USB UART is still unknown.**
+Identifying it needs a reliable stimulus that makes the firmware narrate on demand, and the
+attempt was defeated by the sign having almost nothing to say once its link went stable:
+the verbose output at levels 4–5 is mostly network state-machine churn, which only happens
+while the link is flapping.
 
 ### `sf_rdid` / `sf_rdst` — PARTIAL
 

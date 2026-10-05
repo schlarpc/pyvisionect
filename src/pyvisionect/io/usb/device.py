@@ -64,7 +64,15 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import parsers as P
-from .commands import COMMANDS, Kind, lookup
+from .commands import (
+    COMMANDS,
+    VLOG_DESTINATIONS,
+    VLOG_LEVELS,
+    VLOG_QUIET,
+    VLOG_VERBOSE,
+    Kind,
+    lookup,
+)
 from .console import CommandResult, SerialConsole
 from .errors import (
     CommandNotInFirmware,
@@ -668,69 +676,141 @@ class Sign:
         """``vlog_unify_levels <usb_level>`` -- set one level for every log source
         on the USB destination.
 
-        **The direction of the level scale is unknown, so this may make the
-        asynchronous log stream louder rather than quieter.**  Read the whole of
-        this docstring before calling it.
+        **Level 1 silences the port and level 5 floods it.**  The scale runs
+        quiet-to-loud over ``1..5`` and ``0`` is not a valid argument at all --
+        all measured on firmware 7.4.4407 on 2026-10-05, settling what used to be
+        open question ``A3``.
 
-        What the device says about it, in full -- this is the entire
-        documentation that exists anywhere, because the command is absent from
-        the vendor's published reference::
+        The command is absent from the vendor's published reference, so the
+        device's own one-liner is the only vendor documentation that exists::
 
             vlog_unify_levels <usb_level>: Reset logger levels to default for USB
 
-        What that supports.  The ``vlog_*`` family models logging as a matrix:
-        ``vlog_set_source_level <source> <level>`` sets a producer's level and
-        ``vlog_set_destination_level <destination> <level>`` sets a sink's, so
-        every (source, sink) pair has an effective level.  "Unify", plus a single
-        level argument, plus "for USB", reads as *collapse one column of that
-        matrix to a single value* -- every source set to ``level`` on the USB
-        sink.
+        That help line is simply wrong about "reset to default": the command uses
+        its argument.  ``vlog_set_default_levels`` is the one that resets, and it
+        is nullary.  (This firmware's help text is unreliable elsewhere too --
+        ``conn_fw_ver`` is described as "Scan for WiFi APs".)
 
-        What it does **not** support, and why this method takes a mandatory
-        argument instead of defaulting to 0:
+        What the levels do, by line kind:
 
-        * **Which end of the scale is quiet is not known.**  ``0`` may mean "emit
-          nothing" or it may mean "emit everything".  If it is the latter, this
-          call floods the port.  Nothing observed on hardware distinguishes the
-          two: the only level value ever seen is ``log_config_get`` reporting
-          ``Mobile: 0``, and the Mobile subsystem is not in use on a WiFi sign,
-          so that 0 is equally consistent with "off" and with "default".
-        * **The help line contradicts its own signature.**  "Reset ... to
-          default" describes a command that ignores its argument; ``<usb_level>``
-          describes one that uses it. One of the two is wrong, and this
-          firmware's help text is demonstrably unreliable elsewhere --
-          ``conn_fw_ver`` is described as "Scan for WiFi APs" and
-          ``max17135_dump`` is listed as nullary and rejects a bare call.
+        ===== ==================================================================
+        level what reaches the USB UART
+        ===== ==================================================================
+        1     nothing
+        2, 3  ``E:`` error lines only
+        4     + state narration (``From state N going to state N``, DHCP/IP/DNS)
+        5     + debug detail (``Frame send N bytes``, image transfer, EPD temp)
+        ===== ==================================================================
 
-        So this is the lever that *should* solve the interleaving problem
-        :mod:`pyvisionect.io.usb.console` works around, and it is here so it can
-        be tried, but trying it is an experiment and not a fix.  Do it with a
-        capture running and :meth:`default_logs` ready to undo it, and note that
-        nothing here persists without ``flash_save``.
+        Measured: 0 lines in 90 s at level 1, against 18-61 lines per 90 s at
+        level 5 on a healthy link -- and ~1 400 lines/min at level 5 while the
+        radio was reconnect-flapping, which is the case that matters, because
+        that is when the port is least usable.
+
+        **Level 1 does suppress the asynchronous interleaving**
+        :mod:`pyvisionect.io.usb.console` works to tolerate: the lines it goes
+        quiet on are exactly the heartbeat narration its ``LOG_PATTERNS``
+        exist to filter.  Two caveats before relying on that:
+
+        * **It does not persist, by design or by accident.**  Nothing survives
+          without ``flash_save``, and the sign reboots on its own when it cannot
+          reach its server (``E: Max conn errs. Reboot``), which restores the
+          default verbosity underneath a long-running session.  Re-apply it
+          after any reconnect; do not assume it is still in force.
+        * **It hides the diagnostics too.**  At level 1 you also lose
+          ``E: TCP connection Error: -111`` and friends, which are often the
+          only sign that the far end is dead.  Prefer level 2 or 3 if you want a
+          quiet port that still reports faults.
 
         Args:
-            level: the level to apply. Deliberately has no default.
+            level: the level to apply, 1 (silent) to 5 (everything).
+                Deliberately has no default: which end you want depends on
+                whether you are driving the console or debugging the link.
+
+        Raises:
+            ValueError: if *level* is outside :data:`~pyvisionect.io.usb.commands.VLOG_LEVELS`.
+                The firmware would answer ``E: Invalid argument(s)`` anyway;
+                this just says so without a round trip.
         """
+        if level not in VLOG_LEVELS:
+            raise ValueError(
+                f"vlog level must be in {VLOG_LEVELS.start}..{VLOG_LEVELS.stop - 1} "
+                f"({VLOG_QUIET}=silent, {VLOG_VERBOSE}=everything); got {level!r}. "
+                "0 is not a valid level on 7.4.4407."
+            )
         return self._run(f"vlog_unify_levels {level}")
 
-    def set_log_source_level(self, source: int | str, level: int) -> CommandResult:
+    def silence_usb_logs(self) -> CommandResult:
+        """``vlog_unify_levels 1`` -- stop the sign narrating to the serial port.
+
+        The quiet end of :meth:`unify_usb_log_levels`, named so that callers do
+        not have to remember which end of the scale it is.  Undo with
+        :meth:`default_logs`.
+
+        Read the caveats on :meth:`unify_usb_log_levels` first: this does not
+        persist across the sign's own reboots, and it suppresses the error lines
+        as well as the chatter.
+        """
+        return self.unify_usb_log_levels(VLOG_QUIET)
+
+    def set_log_source_level(self, source: int, level: int) -> CommandResult:
         """``vlog_set_source_level <source> <level>`` -- one producer's level.
 
-        The *source* namespace was never enumerated: no command lists it, and
-        ``log_config_get`` reports a single module (``Mobile``) which may or may
-        not share that namespace. Unverified, like the level scale.
+        The *source* namespace is still **not enumerated**.  The firmware
+        validates the level but accepts any source id at all -- ``-1``, ``32``,
+        ``9999`` are all taken silently -- so probing cannot reveal the range,
+        and an out-of-range id is an unchecked index into firmware state.  This
+        method therefore refuses a negative *source* on its own authority, which
+        is more than the device does.
+
+        Args:
+            source: the log source id. Non-negative; the upper bound is unknown.
+            level: 1 (silent) to 5 (everything).
+
+        Raises:
+            ValueError: if *level* is not a valid level, or *source* is negative.
         """
+        if level not in VLOG_LEVELS:
+            raise ValueError(
+                f"vlog level must be in {VLOG_LEVELS.start}..{VLOG_LEVELS.stop - 1}; "
+                f"got {level!r}"
+            )
+        if source < 0:
+            raise ValueError(
+                f"log source id must be non-negative; got {source!r}. The firmware "
+                "does not range-check this argument, so a bad id is not refused "
+                "by the device -- which is why it is refused here."
+            )
         return self._run(f"vlog_set_source_level {source} {level}")
 
-    def set_log_destination_level(
-        self, destination: int | str, level: int
-    ) -> CommandResult:
+    def set_log_destination_level(self, destination: int, level: int) -> CommandResult:
         """``vlog_set_destination_level <destination> <level>`` -- one sink's level.
 
-        Sinks plausibly include the USB UART, the filesystem (TCLV 161 flushes a
-        syslog to it) and the network link, but the namespace was never
-        enumerated and no value for *destination* has been observed.
+        There are exactly **nine** sinks, ids ``0..8``: unlike the source
+        argument, the firmware range-checks this one and refuses ``-1`` and
+        anything from ``9`` up.  Which id is the USB UART is still unknown --
+        identifying it needs a reliable stimulus, and the attempt on 2026-10-05
+        was defeated by the sign having nothing to narrate once its link went
+        stable.  Sinks plausibly include the USB UART, the filesystem (TCLV 161
+        flushes a syslog to it) and the network link.
+
+        Args:
+            destination: the sink id, 0 to 8.
+            level: 1 (silent) to 5 (everything).
+
+        Raises:
+            ValueError: if either argument is outside its measured range.
         """
+        if level not in VLOG_LEVELS:
+            raise ValueError(
+                f"vlog level must be in {VLOG_LEVELS.start}..{VLOG_LEVELS.stop - 1}; "
+                f"got {level!r}"
+            )
+        if destination not in VLOG_DESTINATIONS:
+            raise ValueError(
+                f"log destination must be in {VLOG_DESTINATIONS.start}.."
+                f"{VLOG_DESTINATIONS.stop - 1}; got {destination!r}"
+            )
         return self._run(f"vlog_set_destination_level {destination} {level}")
 
     def default_logs(self) -> CommandResult:

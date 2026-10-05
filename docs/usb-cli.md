@@ -64,13 +64,26 @@ Four mechanisms separate the streams reliably, and only the last is a heuristic:
 
 Keep the raw byte stream as well as the split views; the split is lossy by construction.
 
-**There may be a way to turn the sink off at source.** The firmware has a `vlog_*` family
-that sets log levels per *source* and per *destination* independently — logging is a matrix
-— and `vlog_unify_levels <usb_level>` applies one level to every source on the USB
-destination. But **which end of that scale is quiet is not known**, so the wrong argument
-floods the port instead of silencing it, and the command's own help line ("Reset logger
-levels to default for USB") contradicts its taking an argument at all. **[GAP]** Settling
-it needs one run with a capture going.
+**The sink can be turned off at source.** The firmware has a `vlog_*` family that sets log
+levels per *source* and per *destination* independently — logging is a matrix — and
+`vlog_unify_levels <usb_level>` applies one level to every source on the USB destination.
+The scale runs **1 (silent) to 5 (everything)** and **`0` is not a valid level**: the
+firmware rejects it, along with `-1`, `6` and anything non-numeric. So
+`vlog_unify_levels 1` silences the port — measured at 0 lines in 90 s, against 18–61 at
+level 5 on a healthy link and ~1 400 lines/min at level 5 while the radio was
+reconnect-flapping. The command's own help line ("Reset logger levels to default for USB")
+is simply wrong; `vlog_set_default_levels` is the one that resets. [W]
+
+By line kind: level 1 emits nothing, 2–3 emit only `E:` error lines, 4 adds state
+narration (`From state N going to state N`, DHCP/IP/DNS), 5 adds debug detail (`Frame send
+N bytes`, image transfer, EPD temperature).
+
+**It is not a replacement for the four mechanisms above**, because it does not persist:
+nothing survives without `flash_save`, and the sign reboots itself when it cannot reach its
+server (`E: Max conn errs. Reboot`), which quietly restores the default verbosity
+mid-session. Treat it as an optimisation for a known-quiet window. It also hides
+`E: TCP connection Error` and friends, so level 2 or 3 is the better choice if you still
+want to see faults.
 
 ## `help` is not a complete index
 
@@ -83,11 +96,11 @@ the only authority**. But `help` does not tell you what that is. Measured on fir
 
 | set | count |
 |---:|---|
-| documented by the vendor | **160** |
+| documented by the vendor | **162** |
 | listed by `help` | **111** |
 | **present and answering** | **112** |
-| hidden — present but not listed by `help` | **1 known** |
-| documented but not listed | 95 |
+| hidden — present but not listed by `help` | **1**, and now on evidence |
+| documented but not listed | 97 — of which **49 probed and genuinely absent** |
 | present but **undocumented** | **47** |
 
 So there are **three** categories, not two: listed, hidden, and absent.
@@ -215,7 +228,7 @@ for the console — you just translate id → command name rather than id → ui
 
 ## Command inventory by area
 
-160 documented commands. [C] Highlights beyond configuration:
+162 documented commands. [C] Highlights beyond configuration:
 
 - **Identity and introspection**: `help`, `uuid_get`, `gtin_get`, `fw_version_get`,
   `fw_checksum_get`, `cli_version_get`, `uptime`, `flash_print` (dumps all stored
@@ -307,7 +320,7 @@ flipping 145 against a server with no certificate strands the device.
 ## What the console cannot give you
 
 For the record, since this comes up: **there is no `mem_read`, `flash_read`, `peek` or dump
-command** in the 160-command documented set. `flash_print` dumps stored *settings* (the
+command** in the 162-command documented set. `flash_print` dumps stored *settings* (the
 TCLV configuration), not flash contents, and `fw_checksum_get` returns a CRC, not data.
 [C] The console yields configuration, not firmware. See
 [firmware.md](firmware.md#where-the-key-is-not).
