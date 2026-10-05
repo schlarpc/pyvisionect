@@ -185,14 +185,46 @@ roughly 6–8 MB of transient peak memory per device being pushed to.
 `frame.state_checksum` becomes `ImageHeader.Checksum`, which is exactly what the
 device echoes back as `DisplayStateCRC` (status tag 9).
 
-### Sync state is tri-state, and persisting it buys you a free restart
+### Sync state is tri-state — and `False` is not yet a problem
 
 ```python
-conn.state.in_sync      # True / False / None
+conn.state.in_sync                 # True / False / None
+conn.state.sync_status(now)        # SyncStatus.{IN_SYNC, CONVERGING, DIVERGED, UNKNOWN}
 ```
 
 `None` means "we have never pushed, or the device has not said yet" — a fresh
 install, not a problem. Present it differently from `False`.
+
+`False` is not a problem *yet* either, which is the part that bites. A push
+legitimately leaves the device disagreeing with us until it has drawn the frame
+and reported the new `DisplayStateCRC`: **10–48 s on the live 31.2" sign**,
+depending on where the push lands relative to the heartbeat. Anything that shows
+`in_sync is False` as a fault therefore raises one after every normal update.
+That is exactly what happened to the Home Assistant integration's
+`binary_sensor.display_out_of_sync`.
+
+`sync_status()` splits that `False` in two. It reports `DIVERGED` only when the
+device has genuinely failed to converge — either it has been in touch
+`CONVERGENCE_CONTACTS` times since the push **and** `settle_time()` has passed,
+or `convergence_grace()` has passed with no word at all. Both windows are
+derived from `NextStatus` (status tag 27), the device's own announcement of when
+it will next be in touch, so a sign on an hourly heartbeat is not called broken
+for the 59 minutes it is away.
+
+The `settle_time()` gate on the contact counter is not belt-and-braces. The sign
+**bursts** status packets around a draw — measured at nine in the first 55 s
+after a push, then one a minute — so the bare counter can be satisfied in fifteen
+seconds, before a 1.84 MB frame has finished transferring.
+
+Pass the clock in, as everywhere else in this library:
+
+```python
+conn.send_image(frame, now=time.monotonic())
+```
+
+Without a `now` the verdict falls back to the contact counter alone, which is
+the right behaviour for a state restored from disk: the push it remembers is
+from before the restart and has long since had its chance.
 
 E-ink keeps its image across a restart, so if you persist the encoder state and
 the checksum, the correct action on first contact is often **nothing at all**:
@@ -606,11 +638,56 @@ conn.read_file_range(FILE_LIST_LENGTH)
 parse_file_listing(reply)         # {name: FileListEntry(size, checksum)}
 ```
 
-The listing's `checksum` column reads `"0"` for every file on this firmware, so
-it identifies nothing. To tell *which* cached frame is which, read the first
-~256 bytes of each `.pv2` and match the stored `ImageHeader.Checksum` against
-`DeviceState.pushed_checksum` — a value we generated ourselves, so it is a match
-rather than a guess, and six 256-byte probes instead of a 3.79 MB sweep.
+The columns are **`name checksum size`** — the useless one is in the middle, and
+it reads `"0"` for every file on this firmware. The order is not a guess:
+`/image0.pv2` lists as 134409 bytes and that file's own `ProtocolHeader.Length`
+reads 134389, which is 134409 minus the 20-byte header.
+
+Every reply the device sends — the listing, and every chunk of a file read —
+arrives as `FileOperation.EVENT` (6), **not** `READ` (2). `read` is the request
+direction only.
+
+### Reading a file back off the device
+
+```python
+listing = await server.list_device_files(uuid)       # one round trip, <1 s
+raw     = await server.read_device_file(             # minutes; see below
+    uuid, "/image0.pv2", listing["/image0.pv2"].size,
+    progress=lambda done, total: print(done, total),
+)
+frame   = parse_stored_frame(raw)                    # -> ImagePacket
+canvas  = decode_image_packet(frame.image, panel).canvas
+```
+
+A `.pv2` is a stored protocol frame: `ProtocolHeader` (version **2**, not the
+wire's 3) + LZ4 block chain + `DataHeader` + an ordinary type-5 image packet.
+`parse_stored_frame_header()` reads the shape out of the first 44 bytes without
+inflating anything. `decode_image_packet()` is the inverse of `encode_frame` and
+is gated on the golden capture round-tripping bit for bit.
+
+Three device facts shape the API rather than being hidden by it:
+
+* **one reply carries at most 1024 bytes**, whatever you ask for (asking for
+  32768 gets you 1024);
+* **there is no seek** — `open` rewinds to zero and nothing else moves the
+  cursor, so a lost reply means restarting the whole transfer;
+* **throughput is ~2.3 KiB/s**, about 420 ms per round trip, so this sign'''s
+  stored frames take **1–9 minutes each**.
+
+`FileRead` in `pyvisionect.session.filetransfer` is the sans-io sequencer if you
+are driving your own io.
+
+**These files are not framebuffers.** On firmware 7.4.4407 `/image0.pv2` …
+`/image5.pv2` are Visionect'''s shipped demo screens — a wayfinding board
+("Welcome to Nanotech inc."), a museum label ("Room 35 — Michelangelo and the
+Florentines") and four more. Pushing a new frame changes none of them: not their
+size, not their first bytes. They also carry `DataHeader.DeviceID == 0` and
+`ImageHeader.Checksum == 0`, which no frame we send ever does
+(`StoredFrame.looks_like_our_push` is that test). So there is **no device-side
+readback of what the panel is currently showing**, and matching a stored
+`ImageHeader.Checksum` against `DeviceState.pushed_checksum` cannot work — the
+field is zero in all six. `DisplayStateCRC` remains the only way to ask the
+device what it is displaying, and it is enough.
 
 An earlier version of these docs said the gateway opens `@screen_<N>` "before
 deciding how to update the screen", making the NACK "the mechanism behind

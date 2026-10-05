@@ -382,29 +382,82 @@ Working code for all of it: `tmp/visionect/agent-a10/a10d_lib.py`
   geometry is untested.
 * Ghosting over hundreds of partials is not characterised -- 12 was clean.
 
-### A11. `display_out_of_sync` false-alarms on every push — OPEN (HA integration)
+### A11. `display_out_of_sync` false-alarms on every push — **FIXED** (2026-10-05)
 
-Confirmed live. A push legitimately leaves the device out of sync until it draws
-the frame and reports the new `DisplayStateCRC` on its next heartbeat --
-measured at **~45-60 s** on this sign. During that window:
+A push legitimately leaves the device out of sync until it draws the frame and
+reports the new `DisplayStateCRC`. Measured on this sign at **10–48 s**,
+depending on where the push lands relative to the heartbeat. The entity carried
+`BinarySensorDeviceClass.PROBLEM`, so Home Assistant raised a problem indicator
+after every normal update. The library's tri-state was right; the presentation
+was not.
+
+**The fix is a fourth state, not a wider timeout.** `DeviceState.sync_status()`
+returns `UNKNOWN` / `IN_SYNC` / `CONVERGING` / `DIVERGED`, and only `DIVERGED`
+turns the sensor on. A mismatch is `DIVERGED` when **either**:
+
+* the device has been in touch `CONVERGENCE_CONTACTS` (2) times since the push
+  **and** `settle_time()` has passed — one full announced interval plus a
+  60 s draw allowance, so those contacts could actually have carried the news;
+* or `convergence_grace()` has passed — `contacts × interval + 60 s` — which
+  catches a sign that stopped calling altogether.
+
+Both windows come from **`NextStatus`** (status tag 27), the device's own
+announcement of when it will next be in touch, rather than a flat timeout. A
+sign on an hourly heartbeat is therefore not called broken for the 59 minutes it
+is legitimately away.
+
+#### The thing that only hardware told us
+
+The first cut used the contact counter alone, on the reasoning that "the device
+has had a chance to report" needs no clock. Live, that is wrong: **the sign
+bursts status packets around a draw.** Measured on 2026-10-05 with a one-minute
+announced heartbeat, contacts after a push went
 
 ```
-t+0s    pushed=3557037784  device=3256188928  in_sync=false
-t+45s   pushed=3557037784  device=3557037784  in_sync=true   updates 3 -> 6
+0 -> 9 in the first 55 s,   then ~1 per minute
 ```
 
-The entity carries `BinarySensorDeviceClass.PROBLEM`, so Home Assistant raises a
-**problem indicator after every normal update**. The underlying tri-state is
-correct and the library is right to report `in_sync=false` in the gap; it is the
-presentation that is wrong.
+so two contacts can elapse in fifteen seconds — before a 1.84 MB frame has even
+finished transferring. The counter is now gated on `settle_time()` for exactly
+this reason, and `tests/test_sync_status.py` pins the case.
 
-Fix: debounce against the expected confirmation window -- only assert the problem
-once the device has had a contact *after* the push and still disagrees (i.e.
-`last_contact > last_push` and still out of sync), or allow ~2x the heartbeat
-interval. Note `pending_changes` already reports its own `in_sync: true` from
-integration bookkeeping, so the two entities visibly contradicted each other
-during the window, which is how this was found.
+#### Verified on the live sign
 
+Push, then sample every 5 s for 260 s
+(`tmp/visionect/agent-fixes/watch.py`):
+
+```
+03:36:00  out_of_sync=off  sync=converging  match=False  pushed=2023074219 device=2881787238
+03:36:10  out_of_sync=off  sync=in_sync     match=True   pushed=2023074219 device=2023074219
+... 250 s, never on
+```
+
+`binary_sensor.display_out_of_sync` **never left `off`**, including the ~10 s
+where the checksums genuinely differed. Recorder history over an earlier push
+agrees: one state row for the whole period, no transitions.
+
+For the genuine-desync half, the sign was left holding a frame whose checksum
+the integration no longer believed (a bogus `pushed_checksum` injected into
+`.storage/visionect.runtime`, with the content source pointed at an unreachable
+URL so the automatic re-assert could not repair it):
+
+```
+03:43:42  out_of_sync=on   sync=diverged    match=False  pushed=123456789 device=2023074219
+... held on for 4 minutes
+03:47:50  out_of_sync=off  sync=in_sync     match=True   pushed=2023074219 device=2023074219   (after a repair push)
+```
+
+Note `checksum_override` is **not** a way to force a desync, contrary to the
+obvious reading: `send_image_packet` records the override as `pushed_checksum`
+and the device echoes the same value back, so the two agree. It is the
+full-redraw lever, not a desync lever.
+
+#### `pending_changes` and `display_out_of_sync` now agree
+
+They visibly contradicted each other during the window, which is how this was
+found. `_pending_attrs` now carries `sync_status` alongside the raw `in_sync`,
+and both read the same verdict. The live trace above shows them in step
+throughout, including `pend.sync=converging` while `out_of_sync=off`.
 
 ### A8. The panel-boundary dark band — OPEN, partially characterised
 
@@ -528,11 +581,33 @@ Never captured. The param packet is precedent for the Go struct (12 B) and the
 wire (8 B) disagreeing, so type 2 is flagged in the API, `refresh`/`clear_screen`
 route through image pushes instead, and `reboot` ships disabled by default.
 
-### B7. Which `.pv2` index is the live framebuffer? — OPEN
-Six buffers for two channels implies current/previous/working. Sidestepped:
-every frame carries an `ImageHeader.Checksum` we computed, stored in block 0, so
-identification is 6 × (open + 256-byte read + close). The *semantics* remain
-unknown.
+### B7. Which `.pv2` index is the live framebuffer? — **ANSWERED: none of them** (2026-10-05)
+
+The question was malformed. `/image0.pv2` … `/image5.pv2` are **not
+framebuffers**; they are Visionect's shipped demo screens, written at the
+factory and never touched again.
+
+Evidence, all from the live sign:
+
+* **A push changes none of them.** Listed before a distinctive full-screen push
+  and again after the device had echoed the new `DisplayStateCRC`: all six sizes
+  identical to the byte, and `/image0.pv2`'s first 16 bytes unchanged.
+* **They carry `ImageHeader.Checksum == 0`** in every file, so the
+  identification shortcut this entry proposed — match the stored checksum
+  against `DeviceState.pushed_checksum` — cannot work at all. Nothing we push
+  ever has a zero checksum; the vendor remaps a computed 0 to 1.
+* **`DataHeader.DeviceID` is sixteen zero bytes**, where any frame we send
+  carries the sign's real UUID.
+* **Two were pulled whole and rendered**: `/image0.pv2` is a wayfinding board
+  ("Welcome to Nanotech inc.", a room directory) and `/image4.pv2` is a museum
+  label ("Room 35 — Michelangelo and the Florentines"). Both are full-canvas
+  4 bpp frames, 2 × 2880×640, `ProtocolHeader.Version` **2**.
+
+So there is no device-side readback of the live frame on firmware 7.4.4407, and
+`DisplayStateCRC` remains the only way to ask the sign what it is showing — which
+is enough, and free. `/image1`, `/image2`, `/image3` and `/image5` were left
+unread; at ~2.3 KiB/s their 199 KB–1.2 MB would have been another 20 minutes of
+chat for no new information.
 
 ---
 
@@ -568,13 +643,77 @@ carries the rest. Fine, but means the full-stream path is unexercised in CI.
 
 ## D. Not yet built
 
-### D1. Home Assistant integration — OPEN
-Designed in detail (entity model, deferred-command queue, content-source
-abstraction, config flow, Web Serial provisioning) but not implemented.
+### D1. Home Assistant integration — BUILT, running
+Implemented and running against the live sign. Lives outside this repo (the
+config dir of the test rig, archived under `artifacts/visionect/ha-integration/`).
 
-### D2. Device framebuffer readback as a feature — OPEN
-Proven possible (`/image0..5.pv2`, plaintext LZ4, read over packet type 10).
-Not yet exposed as a library API or an HA service.
+Fixed 2026-10-05 alongside A11 and D2: **the actions took `device_id` only**, so
+the obvious first call — naming the image entity you can actually see — came
+back as a bare `400`. They now accept `entity_id`, `area_id`, `floor_id`,
+`label_id` and a nested `target:` mapping (which is what the REST API passes
+through verbatim, and was the specific shape that produced the unexplained 400).
+`services.yaml` offers both a device and an entity target on every action so the
+UI picker does too, and "you did not say which sign" is now a schema failure —
+a 400 **with the message** — rather than a `ServiceValidationError`, which the
+REST API renders as a bare 500.
+
+### D2. Device file readback as a feature — **DONE** (2026-10-05)
+
+Built, and pointed at what the device actually holds rather than at the
+framebuffer it turns out not to keep (see B7).
+
+Library:
+
+* `packets/stored.py` — `parse_stored_frame_header()` reads a `.pv2`'s whole
+  shape out of its first 44 bytes; `parse_stored_frame()` decodes the file into
+  an `ImagePacket`. `StoredFrame.looks_like_our_push` is the zero-checksum /
+  zero-UUID test that tells a factory file from one of ours.
+* `imaging/decode.py` — `decode_image_packet()`, the inverse of `encode_frame`,
+  through the interlaced fold and the `eink-flip` mirror. Gated on the golden
+  capture: encode the canvas, decode the result, get the canvas back bit for
+  bit, and the same `ImageHeader.Checksum` (3741864387).
+* `session/filetransfer.py` — `FileRead`, the sans-io `open → read* → close`
+  sequencer.
+* `io/tcp.py` — `VisionectServer.read_device_file()` / `list_device_files()`,
+  plus `add_listener()` so a transfer can watch events without the application
+  routing for it.
+
+Integration: `visionect.read_device_file` (returns the headers and the measured
+rate; populates a diagnostic `image.*_device_file` entity, disabled by default)
+and `visionect.list_device_files`, which now actually works.
+
+#### Three device facts the API exposes rather than hides
+
+| | measured |
+|---|---|
+| reply size cap | **1024 bytes**, whatever you ask for — 32768 returns 1024 |
+| seek | **none**; `open` rewinds to 0 and nothing else moves the cursor |
+| throughput | **~2.3 KiB/s**, ~420 ms per round trip |
+
+So one of this sign's stored frames is **1–9 minutes**, and a lost reply costs
+the whole transfer — `read_device_file(attempts=…)` restarts from zero because
+that is the only recovery that exists. Live: `/image0.pv2`, 134409 bytes,
+**56.4 s at 2.33 KiB/s**, through the Home Assistant service, decoded, and the
+PNG the entity serves is byte-identical to an offline decode of the same bytes.
+
+#### Two bugs this found in the existing file code
+
+Both made the file protocol silently return nothing, and both had been
+code-read rather than measured:
+
+1. **Every reply the device sends is `FileOperation.EVENT` (6), not `READ` (2).**
+   `_DECODERS` had no entry for `event`, so `FilePacket.parsed()` returned
+   `None` for every reply the device has ever sent and the integration's
+   `list_device_files` always reported an empty filesystem.
+2. **The listing columns are `name checksum size`, not `name size checksum`.**
+   Read the old way, every file is zero bytes long. The order is pinned by the
+   files themselves: `/image0.pv2` lists as 134409 and its own
+   `ProtocolHeader.Length` is 134389 = 134409 − 20.
+
+A third, smaller: `PendingWork`'s `framebuffer_read` slot went through
+`apply_pending`, which can only emit **one packet per slot** — so it sent the
+opening `open` and nothing ever read. The integration now drives file work as a
+conversation instead.
 
 ### D3. Firmware decryption — BLOCKED
 AES-**CBC** with a fixed fleet-wide IV, 2016→2024, key absent from the server,
