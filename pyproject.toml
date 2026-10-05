@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pyvisionect"
+version = "0.1.0"
+description = "Sans-io reimplementation of the Visionect e-ink sign wire protocol (protocol v3)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "schlarpc" }]
+keywords = ["visionect", "eink", "epaper", "reverse-engineering", "sans-io"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: System :: Hardware",
+]
+
+# Deliberately tiny. numpy/Pillow belong to pyvisionect.imaging (the [imaging]
+# extra).
+#
+# lz4 is imported lazily. It is needed to compress outbound frames -- the
+# default, and what the gateway always does -- and to inflate an inbound
+# compressed frame, which a device never sends. A deployment that sets
+# ConnectionConfig(compressor=STORED_ONLY) runs with no LZ4 codec at all, so a
+# consumer who wants zero C extensions beyond numpy/Pillow can uninstall it.
+# It stays a default dependency so the out-of-the-box path works.
+#
+# xxhash is NOT optional in practice: imaging has a pure-Python XXH32 fallback,
+# but it is ~9x slower per frame (358 ms vs 39 ms on the 32" canvas).
+dependencies = [
+    "lz4>=4.0",
+    "xxhash>=3.0",
+]
+
+[project.optional-dependencies]
+imaging = ["numpy>=1.24", "pillow>=10.0"]
+usb = ["pyserial>=3.5"]
+test = ["pytest>=7.0", "dpkt>=1.9"]
+
+[project.scripts]
+pyvisionect-provision = "pyvisionect.io.usb:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pyvisionect"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error"]

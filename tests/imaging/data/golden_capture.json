@@ -1,0 +1,57 @@
+{
+  "source": "tmp/visionect/agent-live/pcap/device-11113.pcap",
+  "description": "The 1.84 MB image push captured from the live 32in sign (00112233-4455-6677-8899-aabb00000000) on 2025-10-04. golden_canvas_1440x2560_grey8.raw.xz is the de-interlaced, decoded, un-mirrored session canvas reconstructed from the two wire payloads: 1440x2560 8-bit grey, row-major, stride == width, all values on the n*17 ramp.",
+  "data_header": {
+    "type": 5,
+    "id": 3544696833,
+    "length": 1843268
+  },
+  "image_header": {
+    "Checksum": 3741864387,
+    "NrPrimitives": 2,
+    "Options": 0,
+    "PayloadLength": 1843248,
+    "Reserved": 0
+  },
+  "rectangles": [
+    {
+      "ImageType": 1,
+      "ScreenID": 0,
+      "X": 0,
+      "Y": 0,
+      "Width": 2880,
+      "Height": 640,
+      "RectangleUpdateOptions": 258,
+      "Options": 0,
+      "Encoding": 4,
+      "Reserved": 0,
+      "PayloadLength": 921600,
+      "sha256": "5a894b80be95dbc2cab1c52b5edebe2a1be9c49cbe92d8bbff6436d118241353"
+    },
+    {
+      "ImageType": 1,
+      "ScreenID": 1,
+      "X": 0,
+      "Y": 0,
+      "Width": 2880,
+      "Height": 640,
+      "RectangleUpdateOptions": 258,
+      "Options": 0,
+      "Encoding": 4,
+      "Reserved": 0,
+      "PayloadLength": 921600,
+      "sha256": "bfa853912b0063425377ec193f11d3a301326727630c71c8068b2475755c4289"
+    }
+  ],
+  "session": {
+    "DefaultEncoding": 4,
+    "DefaultDithering": "none",
+    "ImageFlags": 0,
+    "RectangleFlags": 0
+  },
+  "canvas": {
+    "width": 1440,
+    "height": 2560,
+    "sha256": "ea750d0ddffd56140314774f8a79661d00f29594fa4589b13d20a50f14536c2c"
+  }
+}
