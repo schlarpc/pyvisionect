@@ -58,6 +58,7 @@ from .constants import (ALIGN_QUANTUM, BITS_PER_PIXEL, ENCODING_LEVELS,
                         MAX_REGIONS_PER_DISPLAY, OPTION_NORMAL_UPDATE,
                         RECTANGLE_UPDATE_OPTIONS_DEFAULT, VENDOR_DITHERING,
                         Dithering, Encoding, ImageType)
+from .decode import DecodedFrame, decode_image_packet
 from .dither import (BAYER_8, bayer_matrix, blue_noise_matrix, quantise,
                      quantise_floyd_steinberg, quantise_none, quantise_ordered)
 from .encoder import EncodedFrame, EncodedRect, FrameState, encode_frame
@@ -77,6 +78,8 @@ from .rects import (Rect, align_to_quantum, apply_region_count_limit,
 __all__ = [
     # the interface the rest of the library codes against
     "encode_frame",
+    "decode_image_packet",
+    "DecodedFrame",
     "EncodedFrame",
     "EncodedRect",
     "FrameState",

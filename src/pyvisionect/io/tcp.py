@@ -29,12 +29,39 @@ import time
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
+from ..packets.file import (
+    DEVICE_FILE_READ_CHUNK,
+    FILE_LIST_LENGTH,
+    FILE_LIST_PATH,
+    FileListEntry,
+    parse_file_listing,
+)
 from ..session import DeviceConnection, DeviceStateStore
 from ..session.connection import ConnectionConfig
 from ..session.events import Event
-from ..wire.errors import ListenError
+from ..session.filetransfer import FileRead
+from ..wire.errors import ListenError, VisionectError
 
-__all__ = ["DEFAULT_PORT", "ServerStats", "VisionectServer", "EventHandler"]
+__all__ = [
+    "DEFAULT_PORT",
+    "DEFAULT_FILE_TIMEOUT",
+    "FileReadError",
+    "ServerStats",
+    "VisionectServer",
+    "EventHandler",
+]
+
+DEFAULT_FILE_TIMEOUT = 30.0
+"""Seconds to wait for one file reply before giving up on it.
+
+Generous on purpose: a 1 KiB reply takes ~420 ms in the steady state, but the
+device is also drawing panels and talking to wifi, and a reply that is merely
+slow is not worth restarting a nine-minute transfer for.
+"""
+
+
+class FileReadError(VisionectError):
+    """A device file read did not complete."""
 
 DEFAULT_PORT = 11113
 """``main.init`` registers ``flag.String("port", "11113", ...)``; it is not in
@@ -142,6 +169,7 @@ class VisionectServer:
         self._server: asyncio.AbstractServer | None = None
         self._connections: dict[bytes, DeviceConnection] = {}
         self._writers: dict[bytes, asyncio.StreamWriter] = {}
+        self._listeners: list[EventHandler] = []
 
     @property
     def connections(self) -> dict[bytes, DeviceConnection]:
@@ -302,7 +330,39 @@ class VisionectServer:
             writer.write(data)
             await writer.drain()
 
+    def add_listener(self, handler: EventHandler) -> Callable[[], None]:
+        """Also deliver every event to *handler*. Returns an unsubscribe.
+
+        ``on_events`` is the one consumer a server is constructed with, which
+        is right for an application but wrong for a transfer that needs to see
+        replies for the few minutes it runs.  Listeners let such a transfer
+        attach and detach without the application having to route for it.
+
+        A listener that raises is unsubscribed and the exception is logged,
+        rather than taking down the read loop for everyone else.
+        """
+        self._listeners.append(handler)
+
+        def _remove() -> None:
+            try:
+                self._listeners.remove(handler)
+            except ValueError:
+                pass
+
+        return _remove
+
     async def _dispatch(self, conn: DeviceConnection, events: list[Event]) -> None:
+        for listener in list(self._listeners):
+            try:
+                result = listener(conn, events)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception:  # noqa: BLE001 - one listener must not break the rest
+                log.exception("event listener failed; unsubscribing it")
+                try:
+                    self._listeners.remove(listener)
+                except ValueError:
+                    pass
         result = self.on_events(conn, events)
         if asyncio.iscoroutine(result):
             await result
@@ -327,3 +387,121 @@ class VisionectServer:
         if conn is None or writer is None:
             raise KeyError(f"no live connection for {device_id.hex()}")
         await self._flush(conn, writer)
+
+    # ------------------------------------------------------- file transfers
+
+    async def read_device_file(
+        self,
+        device_id: bytes,
+        filename: str,
+        length: int,
+        *,
+        chunk: int = DEVICE_FILE_READ_CHUNK,
+        timeout: float = DEFAULT_FILE_TIMEOUT,
+        attempts: int = 3,
+        stop_on_short: bool = False,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> bytes:
+        """Pull *filename* off the device and return its bytes.
+
+        **This is slow.**  The device answers at about 2.3 KiB/s in 1 KiB
+        replies, so one of the 32" sign's stored frames takes between one and
+        nine minutes.  There is no seek opcode either, so a reply that never
+        arrives costs the whole transfer and the only recovery is to start
+        again -- which is what *attempts* buys.
+
+        Args:
+            device_id: the 16 UUID bytes. The device must be connected now.
+            filename: as the directory listing spells it, slash included.
+            length: bytes to read, from the listing's size column.
+            chunk: bytes per request; clamped to
+                :data:`~pyvisionect.packets.file.DEVICE_FILE_READ_CHUNK`.
+            timeout: seconds to wait for any one reply.
+            attempts: how many times to restart from offset 0 after a lost
+                reply.
+            stop_on_short: end the read at the first reply shorter than the
+                request. For a directory listing, not for a file.
+            progress: called with ``(bytes_so_far, total)`` after every reply.
+
+        Raises:
+            KeyError: if that UUID has no live connection.
+            FileReadError: if the device refused the open, or every attempt
+                lost a reply.
+        """
+        conn = self._connections.get(device_id)
+        if conn is None or device_id not in self._writers:
+            raise KeyError(f"no live connection for {device_id.hex()}")
+
+        seq = FileRead(filename, length, chunk=chunk, stop_on_short=stop_on_short)
+        woke: asyncio.Queue[int] = asyncio.Queue()
+
+        def _listen(source: DeviceConnection, events: list[Event]) -> None:
+            if source.device_id != device_id:
+                return
+            for event in events:
+                if seq.on_event(event, source):
+                    woke.put_nowait(seq.bytes_read)
+
+        unsubscribe = self.add_listener(_listen)
+        try:
+            for attempt in range(1, max(1, attempts) + 1):
+                if attempt == 1:
+                    seq.start(conn)
+                else:
+                    log.info(
+                        "restarting the read of %s from offset 0 (attempt %d/%d)",
+                        filename,
+                        attempt,
+                        attempts,
+                    )
+                    seq.restart(conn)
+                await self.flush(device_id)
+                lost = False
+                while seq.awaiting_reply:
+                    try:
+                        seen = await asyncio.wait_for(woke.get(), timeout)
+                    except asyncio.TimeoutError:
+                        lost = True
+                        break
+                    if progress is not None:
+                        progress(seen, length)
+                    await self.flush(device_id)
+                if seq.failed:
+                    raise FileReadError(seq.error or f"reading {filename} failed")
+                if seq.done:
+                    return seq.data
+                if lost:
+                    # Close the handle so the next attempt opens cleanly; the
+                    # device may or may not answer, and either is fine.
+                    conn.file_close()
+                    with contextlib.suppress(Exception):
+                        await self.flush(device_id)
+            raise FileReadError(
+                f"gave up reading {filename} after {attempts} attempts; got "
+                f"{seq.bytes_read} of {length} bytes. There is no seek opcode, "
+                "so a lost reply means restarting from the beginning."
+            )
+        finally:
+            unsubscribe()
+
+    async def list_device_files(
+        self,
+        device_id: bytes,
+        *,
+        timeout: float = DEFAULT_FILE_TIMEOUT,
+    ) -> dict[str, FileListEntry]:
+        """The device's directory listing, parsed.
+
+        Cheap -- one open, one read, one close, well under a second -- so this
+        is the right thing to call before deciding whether a file is worth
+        pulling.
+        """
+        raw = await self.read_device_file(
+            device_id,
+            FILE_LIST_PATH,
+            FILE_LIST_LENGTH,
+            timeout=timeout,
+            attempts=1,
+            stop_on_short=True,
+        )
+        return parse_file_listing(raw)
