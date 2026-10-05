@@ -77,6 +77,8 @@ from enum import Enum
 
 __all__ = [
     "ABSENT_FROM_7_4_4407",
+    "HIDDEN_IN_7_4_4407",
+    "LISTED_BY_HELP",
     "ASSERTS_AND_KILLS_CLI",
     "COMMANDS",
     "DESTRUCTIVE_COMMANDS",
@@ -255,6 +257,11 @@ _ROWS = (
     ('wifi_ext_region_set', '<region>', 'Set WiFi region cfg', 'DESTRUCTIVE'),
     ('wifi_mac_conf_get', '', 'Display WiFi MAC cfg', 'READ'),
     ('wifi_mac_conf_set', '<mac>', 'Set WiFi MAC cfg', 'DESTRUCTIVE'),
+    # Hidden: absent from `help`, but present and functional. A bare call answers
+    # `E: Invalid argument(s)`, not `Command ... not recognised`. Verified on
+    # 7.4.4407. This is the documented way to set an SSID containing spaces,
+    # and it takes the SSID alone -- no PSK needed.
+    ('wifi_ssid_set', '<ssid>', 'Set WiFi SSID (hidden; handles spaces)', 'DESTRUCTIVE'),
     ('wifi_psk_set', '<psk>', 'Set wpa2 password', 'DESTRUCTIVE'),
     ('wifi_security_set', '<security>', 'Set WiFi security mode', 'DESTRUCTIVE'),
 )
@@ -355,7 +362,6 @@ _ABSENT = (
     'touch_sr_set',
     'touch_test',
     'vcom_test',
-    'wifi_ssid_set',
 )
 
 _UNDOCUMENTED = (
@@ -434,6 +440,22 @@ UART) and does not act on it.
 """
 
 ABSENT_FROM_7_4_4407: frozenset[str] = frozenset(_ABSENT)
+"""Documented by the vendor but **not listed by this firmware's** ``help``.
+
+.. warning::
+
+   Membership here means "absent from ``help``", which is **not** the same as
+   "absent from the firmware". ``wifi_ssid_set`` was in this set until a bare
+   invocation answered ``E: Invalid argument(s)`` rather than
+   ``Command '...' not recognised.`` -- i.e. it is a *hidden* command, present
+   and working. The rest of this set has not been probed that way, so treat it
+   as "unlisted", not "unavailable".
+
+   The probe is safe only for commands taking at least one **required**
+   argument, because argument validation then rejects the call before anything
+   happens. A bare call to a *nullary* command (``fs_format``, ``scpu_reset``,
+   ``cc3100_format``, ``scpu_upgrade``) would **execute** it.
+"""
 """The 96 documented commands this firmware does not have.
 
 Mostly whole hardware families that were not compiled in: every ``scpu_*``
@@ -472,13 +494,30 @@ COMMANDS: dict[str, Command] = {
     )
     for name, args, description, kind in _ROWS
 }
-"""Every command firmware 7.4.4407 answers, keyed by name.
+"""Every command firmware 7.4.4407 is known to answer, keyed by name.
 
-Built from the device's own ``help``, not from the vendor's reference.
+Mostly built from the device's own ``help`` rather than the vendor's reference --
+but ``help`` is not a complete index, so this table is a superset of it: see
+:data:`HIDDEN_IN_7_4_4407`.
 """
 
-assert len(COMMANDS) == 111, f"help on 7.4.4407 lists 111 commands, got {len(COMMANDS)}"
-assert len(ABSENT_FROM_7_4_4407) == 96
+HIDDEN_IN_7_4_4407: frozenset[str] = frozenset({"wifi_ssid_set"})
+"""Present and working, but **not listed by** ``help``.
+
+Found by bare invocation: a hidden command answers ``E: Invalid argument(s)``
+while a genuinely missing one answers ``Command '...' not recognised.``.
+Only ``wifi_ssid_set`` has been probed so far; the rest of
+:data:`ABSENT_FROM_7_4_4407` is unverified and may well contain more of these.
+"""
+
+#: Commands this firmware's ``help`` actually prints.
+LISTED_BY_HELP: frozenset[str] = frozenset(COMMANDS) - HIDDEN_IN_7_4_4407
+
+assert len(LISTED_BY_HELP) == 111, f"help on 7.4.4407 lists 111, got {len(LISTED_BY_HELP)}"
+assert len(COMMANDS) == 111 + len(HIDDEN_IN_7_4_4407)
+assert HIDDEN_IN_7_4_4407 <= frozenset(COMMANDS)
+assert not (HIDDEN_IN_7_4_4407 & ABSENT_FROM_7_4_4407), "a hidden command is not absent"
+assert len(ABSENT_FROM_7_4_4407) == 95
 assert len(UNDOCUMENTED_IN_7_4_4407) == 47
 
 READ_COMMANDS: frozenset[str] = frozenset(
