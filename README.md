@@ -713,7 +713,7 @@ told us what it is. Do not build logic that depends on partial updates landing.
   vendor's gateway escrows with a Visionect HTTPS service; that key material is
   not in the server image, so a self-hosted deployment is plaintext by
   construction. The decoder raises a clear error and the seam is there.
-- **Firmware and bootloader push.** The payloads are AES-ECB under a key that
+- **Firmware and bootloader push.** The payloads are AES-CBC (fixed, fleet-wide IV) under a key that
   exists only on Visionect's servers. Relaying an opaque blob to a device that
   will flash it is not something to ship untested.
 - **Discovery.** There is none. Give Home Assistant an explicit address.
