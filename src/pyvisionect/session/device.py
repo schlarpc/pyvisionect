@@ -104,11 +104,23 @@ class DeviceState:
 
     @property
     def supports_rectangles(self) -> bool:
-        """Whether partial (rectangle) updates can ever land on this device.
+        """Whether the **vendor stack** would ever send this device a partial.
 
         False for ``HardwareNameID == 8``, unconditionally. Defaults to False
         when the hardware id is not yet known, so nothing depends on partials
         before we have heard from the device.
+
+        .. warning::
+           This is a statement about ``getRectangleSupport``
+           (``vss/cmd/engine/client.go:41``), **not** about the panel. The
+           31.2" sign was measured accepting partial rectangles on 2026-10-05:
+           it acks them, draws only the addressed region, and echoes back the
+           state checksum. What it will not take is a rectangle in *canvas*
+           coordinates, because those have to survive the interlaced fold; a
+           rectangle addressed in *screen* coordinates bypasses the fold
+           entirely. See ``OPEN-QUESTIONS.md`` A10. This property is left
+           False so that nothing silently starts emitting partials, but it is
+           the wrong question to ask of the hardware.
         """
         hw = self.hardware_name_id
         if hw is None:

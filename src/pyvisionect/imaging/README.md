@@ -116,10 +116,15 @@ The driver is `eink-flip`: each 1440-wide band is **horizontally mirrored** befo
 packing. Get the mirror or the swap wrong and the sign shows a mirrored or scrambled
 image. Both are verified byte-exactly against captured traffic.
 
-Consequence: **every push to this hardware is full-screen.** `getRectangleSupport`
-returns false unconditionally for it, and structurally the interlacer needs all four
-full-size rectangles, so a partial one cannot be sent. `encode_frame` enforces this
-(`Panel.forces_full_screen`).
+Consequence: **every push `encode_frame` produces for this hardware is full-screen.**
+`getRectangleSupport` returns false unconditionally for it, and the interlacer needs all
+four full-size rectangles, so a partial rectangle in *canvas* coordinates cannot be sent.
+`encode_frame` enforces this (`Panel.forces_full_screen`).
+
+The device is not the limit, though. A rectangle addressed in **screen** coordinates
+never enters the fold, and the sign accepts those: measured on 2026-10-05, acked, drawn
+only where addressed, checksum echoed back. There is no screen-space encoder here yet —
+see `OPEN-QUESTIONS.md` A10 for what one needs to do.
 
 ## The state checksum
 

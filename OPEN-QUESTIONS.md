@@ -88,46 +88,157 @@ notices and does nothing, then forces a reset ~25 min later. They read a
 "Play built-in song." Unknown what it does. Probably explains the reported
 beeping when no server is reachable.
 
-### A10. Do rectangle (partial) updates actually work on this panel? — OPEN
+### A10. Do rectangle (partial) updates actually work on this panel? — **ANSWERED: yes** (2026-10-05)
 
-**The claim we have been making is weaker than it sounds.** `getRectangleSupport`
-returns false *unconditionally* for `HardwareNameID == 8` (`client.go:41`), before
-consulting `MergeRegions`, `ForceRectangleSupport`, or the device option. That is
-**the vendor server's policy**, not a demonstrated property of the device. We have
-been writing it as though the hardware cannot do partial updates; what we actually
-know is that the vendor's software never asks it to.
+**They work.** The device accepts a rectangle smaller than the screen, acks it,
+draws exactly that rectangle and nothing else, and reports back our state
+checksum. The claim we had been making -- "partial updates don't work on this
+hardware" -- was never about the hardware. `getRectangleSupport` returns false
+unconditionally for `HardwareNameID == 8` (`client.go:41`), so the vendor's
+server never sends this sign a partial rectangle. We are the server now, and the
+sign takes them without complaint.
 
-We are the server now, so that policy does not bind us. Nobody has ever sent this
-device a partial rectangle, so nobody knows what it does with one.
+Driven live against the 31.2" Place&Play 32 (firmware 7.4.4407, hardware 1.1.0)
+with `hass-visionect` stopped and our own listener on 11113. **17 pushes, 17
+acks, zero NACKs**, `ErrorCode 0` throughout.
 
-**Why it matters.** Every push is currently a full 1440x2560 frame: ~1.8 MB, ~7 s
-on the wire, and a full-panel waveform. If partials work, a clock that changes one
-digit could be a few KB and a local refresh. That is the difference between a
-sign that updates hourly and one that can update continuously.
+#### What was sent and what came back
 
-**Experiment.**
-1. Full-screen baseline push; record `DisplayStateCRC`.
-2. Push an `ImagePacket` carrying a rectangle **smaller than the full screen** --
-   start in *screen* space (a 2880xN strip on one `ScreenID`), since that avoids
-   the interlacer entirely.
-3. Observe three things: does the device **ack or NACK**; does
-   `DisplayStateCRC` change and to what; and does the **panel actually update only
-   that region** (the PTZ webcam can answer this -- see `tmp/visionect/cam/`).
-4. If a screen-space strip works, try a rect that is *not* full width, then work
-   back toward canvas-space rects and see where the interlacing fold breaks it.
+| # | push | rect | raw bytes | ack | device-echoed `DisplayStateCRC` |
+|---|---|---|---:|---|---|
+| 1 | baseline grid, full screen | 2 x `2880x640` @ screen 0,1 | 1 843 200 | yes, 7 s | `1713733503` = ours |
+| 2 | full-width strip | `2880x128` @ (0,256) screen 0 | 184 320 | yes, 3 s | `2291401510` = ours |
+| 3 | off-axis block | `512x160` @ (1024,448) screen 0 | 40 960 | yes, 3 s | — |
+| 4 | one-band block (lane B held) | `512x192` @ (256,64) screen 0 | 49 152 | yes, 4 s | `4191466816` = ours |
+| 5-16 | same `256x128` block, 12 in a row | `256x128` @ (1600,96) screen 0 | 16 384 each | all, ~3 s each | — |
+| 17 | final card, full screen | 2 x `2880x640` | 1 843 200 | yes, 4 s | `3498374405` = ours |
 
-**Expected failure modes, in increasing order of interest:** NACK (device refuses,
-claim upheld); accepted but the whole panel redraws (no benefit); accepted and
-garbled (geometry assumption wrong); accepted and correct (the claim was wrong and
-there is a large performance win available).
+`DisplayUpdateCount` went **6 -> 23**: every partial counts as one update, same
+as a full frame.
 
-Recoverable either way -- a full-screen push repairs any garbling.
+#### The firmware narrates it
 
-**Related:** `RectangleUpdateOptions` auto-fills `0x0101`/`0x0102` by encoding;
-`noFullUpdateMax = 10` caps consecutive partials server-side in the vendor stack;
-the interlacer wants exactly 4 rects of 1440x640, which is the *mechanical* reason
-canvas-space partials cannot survive the fold -- but a screen-space rect never
-enters the fold.
+The USB console echoes the rectangle header back verbatim, so there is no doubt
+about what the device parsed:
+
+```
+full screen     l: (0   0   0 2880 640), enc: 0x4 pde: 0x0, te: 0x0
+                u: (0   0   0 2880 640), wfn: 2, dum: 1, inv: 1
+strip           l: (0   0 256 2880 128), enc: 0x4 ...
+                u: (0   0 256 2880 128), wfn: 2, dum: 1, inv: 1
+off-axis block  l: (0 1024 448  512 160), enc: 0x4 ...
+```
+
+`(ScreenID X Y W H)`, exactly the `RectangleHeader` we built. Same waveform
+number (`wfn: 2`) for partial and full.
+
+#### The glass agrees, including the fold
+
+Photographed through the PTZ webcam after each push (`tmp/visionect/agent-a10/shots/`).
+
+A **screen-space** rectangle on `ScreenID 0` lands on **two** canvas bands,
+because screen 0 is the 4-pixel interleave of displays 0 and 1. The strip at
+screen `y=256` appeared as two full-width black bars, at canvas `y 256..383` and
+canvas `y 896..1023`, and nothing else on the panel moved -- the whole bottom
+half (`ScreenID 1`, canvas `y 1280..2559`) was untouched. The `512x160` block at
+screen `(1024,448)` landed at canvas `x 672..927`, `y 448..607` and
+`y 1088..1247`, so **X offsets are honoured** too.
+
+Both are exactly where the verified interlace map says they should be. The
+screen-space geometry is:
+
+```
+screen x -> lane column  x/2            (keep x and w multiples of 8)
+lane column c -> canvas column 1439-c   (the eink-flip mirror)
+screen y -> band-local y, unchanged
+screen 0 lanes = displays 0, 1          screen 1 lanes = displays 3, 2
+```
+
+Checked offline before anything went on the wire: a sub-rectangle cut this way
+is **byte-identical** to the same window of the verified full-screen `2880x640`
+payload (`tmp/visionect/agent-a10/verify_geometry.py`, 5/5 match).
+
+#### A canvas-space partial is a screen-space one with the partner lane held
+
+To repaint one band only, send a screen-space rectangle whose **other lane
+carries the unchanged pixels from the server's own state image**. Push #4 did
+that: canvas `y 64..255` went black, and its partner region at canvas
+`y 704..895` -- which was redrawn with identical pixels -- shows no visible
+change at all. Cost is 2x the bytes you strictly need, which is still nothing.
+
+#### No device-side cap on consecutive partials
+
+Twelve partials back to back, ~6 s apart, all acked, none promoted to a full
+redraw, no accumulated ghosting visible at the test site. The vendor's
+`noFullUpdateMax = 10` is a *server-side* policy; the firmware does not enforce
+one. Keeping a periodic full refresh is still sensible for ghosting, but it is
+our choice, not the device's.
+
+#### What it actually buys -- bandwidth, not latency
+
+Measured from the firmware's own `Profiling:` line:
+
+| push | wire bytes (`Pv2Len`) | raw bytes | `EpdUpd` | total |
+|---|---:|---:|---:|---:|
+| full screen, first of session | 144 976 | 1 843 200 | 5 299 ms | 6 298 ms |
+| full screen, steady state | 77 613 | 1 843 200 | 2 916 ms | 3 637 ms |
+| `2880x128` strip | 2 143 | 184 320 | 2 908 ms | 3 039 ms |
+| `512x160` block | 557 | 40 960 | 2 905 ms | 2 992 ms |
+| `256x128` block | **292** | 16 384 | 2 904 ms | **2 983 ms** |
+
+**The honest reading: the wire cost collapses by ~250x, the panel time barely
+moves.** `EpdUpd` is ~2.9 s whatever the rectangle's area -- the waveform has a
+floor on this panel and a partial does not escape it. The first push after a
+long idle took 7 waveform passes and `UPD_FULL`; everything afterwards, partial
+*and* full, took 2-4 passes of `UPD_FULL_AREA`. So `UPD_FULL` vs `UPD_FULL_AREA`
+is **not** "partial vs full rectangle"; it is the device's own periodic clearing
+refresh.
+
+So a clock that changes one digit costs ~300 bytes and ~3.0 s instead of ~78 KB
+and ~3.6 s, plus it saves encoding and LZ4-ing 1.84 MB on the server every tick.
+That is a real win for a battery device on wifi and for a Raspberry Pi doing the
+encoding -- it is **not** the "continuous updates" win we hoped for, because the
+~3 s panel floor is unchanged.
+
+#### What it would take to use this in the library
+
+1. **`DeviceState.supports_rectangles`** (`session/device.py:106`) returns False
+   for `HardwareNameID 8`. That is a correct statement about the *vendor
+   server's* behaviour and a false one about the device. It needs to become two
+   ideas, not one: "the vendor stack would never send one" and "this device
+   accepts one".
+2. **`Panel.forces_full_screen`** (`imaging/panel.py:248`) promotes every frame
+   to full screen. Verified: `encode_frame(..., rects=[Rect(200,300,400,100)],
+   prev_state=...)` returns `full_screen=True` with the usual 2 x `2880x640`.
+   Patch that property out and the next gate fires --
+   `ValueError: interlacing needs exactly one full-size rectangle per display
+   (got [1, 0, 0, 0])`. Both gates are *about the fold*, and both are correct
+   for a canvas-space rectangle.
+3. **The missing piece is a screen-space encoder**, which never enters the fold:
+   cut the rectangle from the state canvas for both lanes of the target screen
+   (`INTERLACE_PAIRS[2]`), mirror, pack 4 bpp, interleave, emit one `Rectangle`
+   with screen-space `x/y/w/h`. Constraints: `x` and `w` multiples of 8 so each
+   lane row is a whole number of 2-byte interleave groups, and the existing
+   `w*h % 4 == 0` quantum.
+4. **Checksum bookkeeping has to follow the partial.** Apply the rectangle to
+   the state image and re-hash, or the device's echoed `DisplayStateCRC` will
+   not match and the next push costs a redundant full redraw. Every partial
+   above did this and every echo came back equal.
+
+Working code for all of it: `tmp/visionect/agent-a10/a10d_lib.py`
+(`lane_regions`, `screen_rect`).
+
+#### Still unknown
+
+* **Out-of-bounds rectangles were deliberately not probed** (`y+h > 640`,
+  `x+w > 2880`). Whether the firmware clamps, refuses, or writes past its
+  framebuffer is unmeasured, and poking a memory-safety edge on a kitchen sign
+  was not worth it. Clamp server-side until someone tests it.
+* Only `ScreenID 0` was exercised on hardware. Screen 1 is the same code path
+  with the lane swap (displays 3, 2) and was checked offline, not on glass.
+* Only one rectangle per packet was sent; `NrPrimitives > 1` with mixed
+  geometry is untested.
+* Ghosting over hundreds of partials is not characterised -- 12 was clean.
 
 ### A11. `display_out_of_sync` false-alarms on every push — OPEN (HA integration)
 

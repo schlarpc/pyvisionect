@@ -249,11 +249,18 @@ class Panel:
         """True when every update must be a full-screen one.
 
         ``getRectangleSupport`` returns ``false`` unconditionally for
-        ``HardwareNameID == 8`` (``vss/cmd/engine/client.go:41-42``), and the
-        reason is structural: :func:`interlace_payloads` needs all four
-        full-size display rectangles, so a partial rectangle simply cannot be
-        interlaced (spec §1.6, §1.7).  Neither ``ForceRectangleSupport`` nor
-        ``MergeRegions=true`` can turn it on.
+        ``HardwareNameID == 8`` (``vss/cmd/engine/client.go:41-42``), and for a
+        **canvas-space** rectangle the reason is structural:
+        :func:`interlace_payloads` needs all four full-size display rectangles,
+        so a partial one cannot be interlaced (spec §1.6, §1.7).  Neither
+        ``ForceRectangleSupport`` nor ``MergeRegions=true`` can turn it on.
+
+        .. note::
+           The device itself is not the obstacle.  A rectangle addressed in
+           **screen** coordinates never enters the fold, and the 31.2" sign was
+           measured accepting those on 2026-10-05 (``OPEN-QUESTIONS.md`` A10).
+           :func:`~pyvisionect.imaging.encode_frame` has no screen-space path,
+           so this property stays True for it.
         """
         return self.interlace_mode != 0
 

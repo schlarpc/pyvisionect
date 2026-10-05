@@ -701,11 +701,18 @@ honest about it rather than silently using a guess:
 True
 ```
 
-Delta updates are implemented in the vendor server but **unreachable on this
-hardware**: `getRectangleSupport` returns false unconditionally for
+Delta updates are implemented in the vendor server but it **refuses to send them to
+this hardware**: `getRectangleSupport` returns false unconditionally for
 `HardwareNameID == 8`, before it even consults the device options. Hence
 `DeviceState.supports_rectangles`, which defaults to `False` until the device has
-told us what it is. Do not build logic that depends on partial updates landing.
+told us what it is.
+
+That is server policy, not a panel limit. The 31.2" sign **does** accept partial
+rectangles — measured 2026-10-05, 15 of them acked and drawn only where addressed. What
+it cannot take is a rectangle in *canvas* coordinates, which would have to survive the
+interlaced fold; one addressed in *screen* coordinates bypasses the fold. This library
+has no screen-space encoder yet, so for now: do not build logic that depends on partial
+updates landing. See `OPEN-QUESTIONS.md` A10.
 
 ## What is deliberately out of scope
 

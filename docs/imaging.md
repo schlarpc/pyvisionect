@@ -598,11 +598,12 @@ padding; and `NrPrimitives = 2` with `W = 2880` is the interlaced output. [W]
 > `DataHeader.ID` (3544696833) is a packet sequence id, **not** the image checksum. The
 > image state tag is `ImageHeader.Checksum`.
 
-## Region and delta updates exist but are unreachable here
+## Region and delta updates: the vendor server refuses them, the device does not
 
 The captured traffic shows **only full-frame pushes**, roughly hourly, and **no deltas at
 all**. That is not because delta push is missing — the whole machinery exists and is
-reachable on other hardware. Three independent gates close it for `HardwareNameID 8`: [D]
+reachable on other hardware. Three gates close it for `HardwareNameID 8` in the vendor
+stack: [D]
 
 1. The server's rectangle-support check returns **false unconditionally** for
    `HardwareNameID == 8`, *before* consulting the merge configuration, a global force
@@ -611,7 +612,7 @@ reachable on other hardware. Three independent gates close it for `HardwareNameI
    the full-screen response path: every update is a full-screen 4-rectangle set, which
    interlacing then folds into 2.
 2. Interlacing only fires on exactly four full-size rectangles (above), so a set of small
-   dirty rectangles could not be interlaced for the panel anyway.
+   dirty rectangles in **canvas** coordinates could not be interlaced for the panel anyway.
 3. A separate cap forces a full update after **10** consecutive partial updates, even
    where partials work.
 
@@ -620,11 +621,61 @@ server's per-display bookkeeping on this device — they shape the internal rect
 and hence which displays are marked dirty — but their output is overridden by the
 full-screen requirement before the packet is built. [D]
 
-> **This is server policy, not a measured device limit.** `getRectangleSupport` returns false *unconditionally* for `HardwareNameID == 8`, so the vendor's software never sends this hardware a partial rectangle. Whether the **device** would accept one has never been tested -- nobody has ever sent it one. See `OPEN-QUESTIONS.md` A10.
+> **All three are server policy. The device itself accepts partial rectangles.** Verified
+> on the 31.2" sign on 2026-10-05 with our own listener: 15 partial rectangles — a
+> `2880x128` strip, an off-axis `512x160` block, and twelve `256x128` blocks back to back
+> — were all acked, all drawn **only where addressed**, and all echoed back as
+> `DisplayStateCRC` equal to the state checksum we computed. `DisplayUpdateCount`
+> advanced once per partial, no NACK, and no device-side forced full refresh. [W]
+> See `OPEN-QUESTIONS.md` A10 for the full evidence.
 
-**Do not build logic that depends on partial updates landing.** A reimplementation
-targeting this hardware needs only the full-frame path; the region logic matters for other
-Visionect hardware and for matching the vendor's internal checksum bookkeeping exactly.
+### How a partial has to be addressed on this hardware
+
+Gate 2 above is real and is the whole trick: a rectangle in **canvas** coordinates cannot
+survive the fold, because `interlacingHack` wants four full-size display rectangles. A
+rectangle in **screen** coordinates never enters the fold at all — it is addressed
+directly at one of the two physical `2880 x 640` channels, and the interleave is something
+the *encoder* performs rather than something the rectangle must pass through:
+
+```
+screen x -> lane column  x / 2            (x and w multiples of 8, so each lane row
+                                           is a whole number of 2-byte groups)
+lane column c -> canvas column 1439 - c   (the eink-flip mirror)
+screen y -> band-local y, unchanged
+ScreenID 0 lanes = displays 0, 1          ScreenID 1 lanes = displays 3, 2
+```
+
+A sub-rectangle cut this way is byte-identical to the same window of the full-screen
+`2880 x 640` payload. [W] Note the consequence: **one screen-space rectangle always
+touches two canvas bands**, 640 rows apart. To repaint a single band, fill the partner
+lane with the unchanged pixels from the state image — twice the bytes you strictly need,
+still a rounding error against 1.84 MB, and verified to leave the partner band visually
+untouched. [W]
+
+The firmware echoes the parsed header to the USB console as
+`l: (ScreenID X Y W H), enc: 0x4` followed by `u: (...), wfn: 2`, which makes a partial
+easy to confirm without a camera. [W]
+
+### What a partial actually saves
+
+Measured from the firmware's own `Profiling:` line, same sign, 22 °C: [W]
+
+| push | `Pv2Len` (wire) | raw bytes | `EpdUpd` | total |
+|---|---:|---:|---:|---:|
+| full screen, steady state | 77 613 | 1 843 200 | 2 916 ms | 3 637 ms |
+| `2880 x 128` strip | 2 143 | 184 320 | 2 908 ms | 3 039 ms |
+| `256 x 128` block | **292** | 16 384 | 2 904 ms | **2 983 ms** |
+
+**The wire cost collapses; the panel time does not.** `EpdUpd` is ~2.9 s regardless of
+area — the waveform has a floor on this panel. A partial saves bandwidth, server encode
+time and LZ4 work, not refresh latency. The `UPD_FULL` / `UPD_FULL_AREA` distinction in
+the console is the device's own periodic clearing refresh, **not** full-versus-partial:
+the first push after a long idle is `UPD_FULL` with 7 waveform passes, and everything
+after it — partial *and* full-screen — is `UPD_FULL_AREA` with 2–4. [W]
+
+A reimplementation that only ever pushes full frames remains correct and is what this
+library does today; the region logic matters for other Visionect hardware, for matching
+the vendor's internal checksum bookkeeping exactly, and now for the partial path above.
 
 Related constants, for completeness: [D]
 
