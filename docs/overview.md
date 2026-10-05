@@ -223,3 +223,33 @@ In rough dependency order, what you actually have to implement:
 
 You do not need: the crypto, packet type 2 (command), the CBOR packet type, the firmware
 transfer, or region/delta updates. Each is explained where it appears.
+
+---
+
+## An unreachable server makes the sign reboot itself
+
+If nothing answers on the configured server address, the device does not simply
+retry forever. After a number of consecutive connection failures the firmware
+gives up and **power-cycles itself**, announcing it on the console as:
+
+```
+E: Max conn errs. Reboot
+```
+
+Observed on firmware 7.4.4407: roughly **two reboots in 40 minutes** of server
+downtime. [VERIFIED -- seen on the serial console, with the device's `last_boot`
+moving correspondingly.]
+
+Two consequences for anyone implementing a server:
+
+1. **Server downtime is not free.** It costs the device reboots, and each reboot
+   costs a full-screen redraw and a fresh DHCP/ARP/TCP cycle. Keep the listener
+   up, and prefer a brief restart over a long outage.
+2. **The status packet does not report it.** `ErrorCode` stays `0x0` throughout,
+   so a server that only reads device status cannot see that it is causing
+   reboots. The only in-band signal is `Uptime` resetting and `ConnectReason`
+   changing; the explicit message exists solely on the USB console.
+
+This is also why a device whose server has moved can appear to "re-dial on its
+own" an hour later: it is not a retry timer, it is the device rebooting into its
+newly saved configuration.
