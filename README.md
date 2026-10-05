@@ -537,9 +537,16 @@ minted fresh per activation and never transmits them; it sends the escrow
 service's opaque response verbatim and the device is expected to resolve it
 using what it already holds. TCLV 131 is that long-term secret, not the session
 key, and reproducing the resolution means reading firmware that ships encrypted.
-Use **TLS** instead: TCLV 145 is *"TLS mode: 0=disabled, 1=TLS 1.3"*, it is
-network-writable (no USB needed), the gateway's TLS is opportunistic on the same
-port, and there is no certificate pinning on the device link.
+**TLS is the better answer in principle and is implemented here** --
+`VisionectServer(certfile=..., keyfile=...)` sniffs the first six bytes of each
+connection for a ClientHello and upgrades only that connection, so plaintext and
+TLS signs share the one port exactly as the vendor's gateway arranges it. But
+the device half depends on TCLV 145 (*"TLS mode: 0=disabled, 1=TLS 1.3"*), and
+on the firmware this was developed against (7.4.4407) **the device does not
+implement 145**: it refuses both a read and a write of it with the same code it
+gives for a parameter id that does not exist. So on that firmware there is no
+transport security available at all, and the control is network isolation. See
+`OPEN-QUESTIONS.md` A4 for the wire evidence.
 
 `pyvisionect.io.usb.encryption` holds all of this with its provenance, and
 `pyvisionect-usb encryption` prints it. No setter in that module has ever been

@@ -194,17 +194,148 @@ API now: `unify_usb_log_levels(level)` validates 1–5 and keeps its mandatory
 argument (a console driver wants 1, someone debugging a dead link wants 3);
 `silence_usb_logs()` is the shorthand for the quiet end.
 
-### A4. TLS on port 11113 — OPEN
-`ProtocolHeader` sniffing shares the port with plaintext; the vendor peeks 6
-bytes for a ClientHello. TCLV **145** (`TLS mode: 0=disabled, 1=TLS 1.3`) is
-network-writable, so it can be set through our own listener.
-Needs: an SSL context + the same 6-byte peek in `io/tcp.py`, a self-signed cert,
-then flip 145. **Unknowns:** does the device validate the server certificate,
-and against what trust store? No TCLV parameter for a server CA was found, which
-*suggests* no validation — unverified. Also unverified whether 145 survives
-without `flash_save`.
-> One-way door: enabling 145 against a server with no cert strands the device
-> (recoverable only over USB). Cert first, then flip.
+### A4. TLS on port 11113 — **ANSWERED: the server side works, the device side does not exist** (2026-10-05)
+
+**TLS is implemented and proven against the live sign's own listener. The sign
+will never use it: firmware 7.4.4407 does not implement TCLV parameter 145 at
+all,** and answers both a read and a write of it with the same error code it
+gives for a parameter id that was invented for the experiment.
+
+So the one-way door turns out not to be a door. It cannot be opened from the
+network, which also means it cannot be used to strand the sign — the hazard this
+item was written around is not reachable on this firmware.
+
+#### The server half: opportunistic TLS on the one port
+
+`io/tcp.py` now does what the gateway does. Pass `ssl_context=` (or
+`certfile=` / `keyfile=`, or use `server_ssl_context()`), and the first six
+bytes of each connection decide, per connection, whether it is TLS or
+plaintext. One listener, one port, both protocols. With nothing configured the
+behaviour is as before.
+
+Two details worth keeping:
+
+- **`loop.start_tls()` cannot be used.** Recognising a ClientHello means
+  consuming the six bytes that begin it, and OpenSSL reads from the socket, so
+  it would never see them and the handshake would die on a malformed record.
+  The listener drives an `ssl.SSLObject` over a pair of `ssl.MemoryBIO`
+  instead, which puts us in charge of what OpenSSL reads — and the first thing
+  it reads is those six bytes. The adapter quacks like the
+  `StreamReader`/`StreamWriter` pair the read loop already used, so nothing
+  above it changed.
+- **The sniff runs even with TLS off.** Not for the upgrade, which is
+  impossible without a certificate, but so that a ClientHello arriving at a
+  plaintext-only listener is logged and counted (`ServerStats.tls_unsupported`)
+  instead of being rejected as a bad frame header. That was the one failure
+  mode capable of stranding a sign, and it needed to be legible.
+
+There is no collision with the plaintext path and the tests say so over every
+six-byte window of a real frame: `ProtocolHeader.Version` is a little-endian
+`uint32`, so version 3 puts `03 00 00 00` on the wire and fails the sniffer's
+first test. A header would have to carry `Version == 0x01030316` to pass.
+
+Verified against the **live Home Assistant listener** the sign was connected
+to at the time, with a self-signed certificate for `10.42.0.50`:
+
+```
+version: TLSv1.3
+cipher : ('TLS_AES_256_GCM_SHA384', 'TLSv1.3', 256)
+peer cert bytes: 800
+```
+
+and, in the same process, the sign itself reconnected and kept working in
+plaintext. That is the whole point of the design: `tls_accepted 1`,
+`identified 1`, bytes flowing both ways, one port.
+
+#### The device half: parameter 145 is not in this build
+
+Everything below is from the wire, decoded out of a `tshark` capture of the
+sign's own connection. Three attempts, one answer:
+
+| what the server sent | what the device answered |
+|---|---|
+| `id=145 control=0 (read) len=0` | `control=2 (read error) value=00 00 58 00` |
+| `id=145 control=1 (write) len=1 value=01` | `control=3 (write error) value=00 00 58 00` |
+| `id=145 control=1 (write) len=4 value=01000000` | `control=3 (write error) value=00 00 58 00` |
+
+`00 00 58 00` is not a generic "no", and that is the whole argument. Sweeping
+130..160 one id at a time produced **four different** error values, and the
+three that are not `0x58` land on parameters this device demonstrably has:
+
+| error value | ids |
+|---|---|
+| `0x58` | 133–137, 141, 142, **145**, 146–151, 158–160, and **250, invented for this test** |
+| `0x5d` | 138 (`BLE MAC`), 143 (`Executes WiFi module upgrade`), 157 (`Format the file system`) |
+| `0x8d` | 139 (`Performs WiFi scan`) |
+| `0x60` | 140 (`BLE advertising data`) |
+| `0x5a` | **29** (`Heart beat interval`) — on a *one-byte* write only |
+
+BLE is enabled on this sign (155 reads 1), it has a filesystem, it has a WiFi
+module — and those ids answer with something other than `0x58`. The firmware is
+not refusing everything it does not want to discuss with one code; it is
+distinguishing cases, and 145 falls in the same bucket as an id that exists in
+no table anywhere.
+
+`0x5a` is the other end of the control. Parameter 29 read back cleanly as
+`01000000` in the same session, so it exists; a one-byte write of 2 was refused
+with `0x5a`, and a four-byte write of the same value was then **accepted** and
+read back as `02000000`. So the device also distinguishes "your value is wrong"
+from "no such parameter" — and 145 gets the second, from the read path (which
+carries no value at all and so cannot be a value complaint) *and* from the
+write path at the correct width.
+
+The parameter table in `devices/tclv.py` is the **server's** table: it covers
+every device generation the gateway supports. This firmware implements a sparse
+subset of it — in 130..160 it answers only 130, 131, 132, 144, 152, 153, 154,
+155 and 156. 145 is simply not in the 7.4.4407 build.
+
+(The remaining three error values have no interpretation. Three of their four
+ids are command-shaped, which is suggestive and nothing more.)
+
+And the sign never behaved as though anything had changed. Four separate
+connections were captured across the experiment window, including one the sign
+dialled from scratch after `cs 1` tore the session down **immediately after an
+attempted write of 145**. Every one of them opened `03 00 00 00 00 00`. No
+ClientHello ever left the device.
+
+#### What this settles, and what it does not
+
+**Settled.** TLS cannot be enabled on this sign from the network. The hazard
+this item was written around — enabling 145 against a certificate-less server
+and stranding the device — is unreachable here, because the write never lands.
+
+**Settled, incidentally.** That the device has a refusal *vocabulary* rather
+than one error, which is what made any of this diagnosable — and that TCLV
+value width is a property of the parameter rather than of the value. That
+second one was a live bug: `write_params({29: 1})` had been sending one byte to
+a `uint32` and being refused silently, because nothing looked at `control=3`.
+Fixed, with the measured widths recorded in
+`devices.tclv.VALUE_WIDTHS`; `flash_save` (53) is genuinely one byte, which is
+why it had always worked and why nobody noticed.
+
+**Still open — and no longer answerable from this sign.**
+
+- *Does the device validate the server certificate, and against what?* No
+  ClientHello was ever sent, so nothing validated anything. The inference
+  stands and stays an inference: no TCLV parameter for a server CA exists
+  anywhere in the table, and the device's only certificate store is the WiFi
+  EAP one, which `certs_config_get` reports as `No EAP cert found!`. That is
+  suggestive of no validation, or of a baked-in store, and it is not evidence.
+- *Does 145 survive without `flash_save`?* Unanswerable: there is nothing to
+  persist. It stays open for a firmware that implements the parameter.
+- *Does the device's TLS stack exist at all?* The parameter's description string
+  (`"TLS mode: 0=disabled, 1=TLS 1.3"`) is in the vendor's **server** binary,
+  not in this firmware. Whether 7.4.4407 contains a TLS implementation that is
+  merely unreachable, or no implementation, would need the firmware image —
+  which is encrypted (D3).
+
+The only route left to the device half is a firmware with 145 in it. The
+server half is done and will work the moment such a device appears: it is the
+same six-byte test the vendor's own gateway applies.
+
+> The "one-way door" warning is retired for this firmware. Keep it for any
+> device that *does* answer a read of 145 — against such a device the order is
+> still certificate first, parameter second.
 
 ### A5. Push an image to the sign from `pyvisionect` — **DONE**
 Driven end to end on 2026-10-04 against the live 31.2" sign, with no vendor

@@ -88,8 +88,9 @@ What this means if you are implementing a server:
   serial console with `uuid_get`, printed by the vendor server's own UI, and structured:
   on the reference device, bytes 6..11 are the ASCII digits of the unit's serial number.
   [W] Do not treat it as a bearer token.
-- **Put the listener somewhere only the sign can reach it**, or add TLS (below). The
-  protocol gives you nothing else.
+- **Put the listener somewhere only the sign can reach it.** TLS (below) is implemented on
+  the server side, but the device side needs a parameter the tested firmware does not
+  have, so network isolation is the only control that actually works today.
 
 ### The derived "device ID hash"
 
@@ -165,17 +166,47 @@ devices share one port.** [D]
   deployment the TLS branch is never taken. [D] The reference deployment logged
   `"couldn't get TLS certificate modification time: ... no such file or directory"` every
   60 s. [W]
-- Parameter 145 is **network-writable**, so a reimplementation can turn TLS on without
-  touching USB. [C]
+- Parameter 145 is network-writable **in the gateway's descriptor table** [C] -- but see
+  below: the device this was tested on does not implement the parameter at all.
 
-**[GAP]** Whether the device validates the server certificate, and against what trust
-store. No TCLV parameter for a server CA was found anywhere in the parameter table, which
-*suggests* no validation [I], but this is unverified. It is also unverified whether
-parameter 145 survives a reboot without an explicit `flash_save`.
+`pyvisionect` implements the server half.
+`VisionectServer(certfile=..., keyfile=...)` applies the same six-byte test and upgrades
+only the connections that pass it, so plaintext and TLS signs share one port. It has been
+verified to complete a TLS 1.3 handshake (`TLS_AES_256_GCM_SHA384`) against a real client
+while a real sign stayed connected in plaintext on the same listener. [W]
 
-> **One-way door.** Enabling parameter 145 against a server that has no certificate
-> strands the device, recoverable only over the serial console. Install the certificate
-> first, then flip the parameter.
+**The device half is not available on firmware 7.4.4407.** Reading parameter 145 returns
+`control=2` (read error) with value `00 00 58 00`; writing it returns `control=3` with the
+same value -- and `00 00 58 00` is byte-for-byte what the device returns for parameter id
+250, which does not exist in any table. [W] The firmware emits **four** distinct error
+values across 130..160, and the other three land on parameters it demonstrably has (138
+`BLE MAC`, 139 `Performs WiFi scan`, 140 `BLE advertising data`, 143 and 157), so `0x58`
+is specifically "no such parameter" and not a blanket refusal. [W] A parameter that exists
+but gets an unacceptable value returns `00 00 5a 00` instead: a one-byte write to 29 was
+refused that way and a four-byte write of the same value was accepted. [W] In 130..160
+this firmware answers only 130, 131, 132, 144 and 152..156 -- a sparse subset of the
+gateway's table. After an attempted write of 145 and a forced reconnect, the device's
+connection still opened `03 00 00 00` -- no ClientHello. [W]
+
+So on this firmware there is **no transport security available at all**, and the control
+is network isolation. Details and the full wire trace are in `OPEN-QUESTIONS.md` A4.
+
+**[GAP]** Whether a device that *does* implement 145 validates the server certificate, and
+against what trust store. No TCLV parameter for a server CA exists anywhere in the table,
+and the device's only certificate store is the WiFi EAP one (`certs_config_get` reports
+`No EAP cert found!`), which *suggests* no validation [I] -- still unverified, and no
+longer verifiable from this device, because it never offers a ClientHello to validate
+anything with.
+
+**[GAP]** Whether parameter 145 survives a reboot without `flash_save`. Unanswerable here:
+there is nothing to persist.
+
+> **One-way door, for a device that does answer a read of 145.** Enabling the parameter
+> against a server that has no certificate strands the device, recoverable only over the
+> serial console. Install the certificate first, then flip the parameter. The listener
+> sniffs for a ClientHello even with TLS switched off, purely so that this mistake is
+> logged and counted (`ServerStats.tls_unsupported`) rather than showing up as a bad
+> frame header.
 
 ### 3. `MobSecurity` — not transport security at all
 

@@ -62,11 +62,29 @@ __all__ = [
 PARAM_ERROR_NO_SUCH_PARAMETER = 0x00580000
 """Error value for a parameter this firmware does not implement.
 
-Measured: reading 145 (``TLS mode``), 146 (``EPD count``) and the deliberately
-invented id 250 all came back ``control=2``, ``Length=4``,
-``value=00 00 58 00`` -- byte for byte identical. So the firmware answers
-"never heard of it" and "I have it but will not tell you" the same way, if it
-even distinguishes them.
+Measured: reading 145 (``TLS mode``), 146 (``EPD count``), 147..151, 158..160
+and the deliberately invented id 250 all came back ``control=2``, ``Length=4``,
+``value=00 00 58 00`` -- byte for byte identical.
+
+What makes this a *reading* rather than a guess is that other refusals in the
+same sweep came back **different**. Sweeping 130..160 on firmware 7.4.4407
+produced four distinct error values, and the ones that are not ``0x58`` land on
+parameters the device demonstrably has:
+
+===========  ===============================================================
+error value  ids
+===========  ===============================================================
+``0x58``     133-137, 141, 142, 145-151, 158-160, and the invented 250
+``0x5d``     138 (BLE MAC), 143 (WiFi module upgrade), 157 (format filesystem)
+``0x8d``     139 (performs WiFi scan)
+``0x60``     140 (BLE advertising data)
+===========  ===============================================================
+
+BLE is on (155 reads 1), the filesystem exists, the WiFi module exists -- and
+those ids answer with something *other* than ``0x58``. So ``0x58`` is the
+firmware saying it has no such parameter, not a blanket "no". The other three
+values have no interpretation here; three of their four ids are command-shaped,
+which is suggestive and nothing more.
 """
 
 PARAM_ERROR_BAD_VALUE = 0x005A0000
