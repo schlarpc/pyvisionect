@@ -7,11 +7,18 @@ server's job is to listen, accept whatever connects, and let the sans-io
 There is no auth and no handshake, so this listener accepts every connection.
 Put it somewhere only your signs can reach.
 
-The vendor's gateway also sniffs the first 6 bytes for a TLS ClientHello
+The vendor's gateway sniffs the first 6 bytes for a TLS ClientHello
 (``b[0] == 0x16``, ``b[1] == 0x03``, ``b[2] in 1..4``, ``b[5] == 0x01``) and
-opportunistically upgrades.  We do not: the 8.5.5 image ships no certificate, so
-real deployments are plaintext, and TCLV 145 (``TLS mode``) is read-only over
-the network anyway.
+opportunistically upgrades, so plaintext and TLS devices share one port.  So do
+we: pass *ssl_context* (or *certfile* / *keyfile*) and the same 6 bytes decide,
+per connection, which protocol this one is.  With no context configured the
+listener is plaintext-only, exactly as before.
+
+The sniff runs either way, because the one realistic way to strand a sign is to
+set TCLV 145 (``TLS mode: 0=disabled, 1=TLS 1.3``) against a listener that has
+no certificate.  That failure is otherwise invisible -- the frame decoder just
+rejects the ClientHello as a bad header -- so the peek happens even when TLS is
+off, purely to log it and count it in :attr:`ServerStats.tls_unsupported`.
 
 Memory note: a full-screen push to the 32" panel is a single ~1.84 MB write.
 Between the encoded rectangles, the block chain and the socket buffer, budget
@@ -25,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import ssl
 import time
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
@@ -45,10 +53,13 @@ from ..wire.errors import ListenError, VisionectError
 __all__ = [
     "DEFAULT_PORT",
     "DEFAULT_FILE_TIMEOUT",
+    "TLS_PEEK_BYTES",
     "FileReadError",
     "ServerStats",
     "VisionectServer",
     "EventHandler",
+    "looks_like_client_hello",
+    "server_ssl_context",
 ]
 
 DEFAULT_FILE_TIMEOUT = 30.0
@@ -69,7 +80,61 @@ DEFAULT_PORT = 11113
 
 READ_CHUNK = 65536
 
+TLS_PEEK_BYTES = 6
+"""How many bytes the vendor's gateway peeks before deciding TLS or plaintext.
+
+Six, because ``b[5]`` is the handshake-message type and that is the last byte
+the test looks at.
+"""
+
 log = logging.getLogger(__name__)
+
+
+def looks_like_client_hello(head: bytes) -> bool:
+    """The vendor gateway's ClientHello test, byte for byte.
+
+    ``head[0] == 0x16`` (a handshake record), ``head[1] == 0x03`` and
+    ``head[2] in 1..4`` (TLS 1.0 through 1.3 in the legacy record version), and
+    ``head[5] == 0x01`` (``ClientHello``).
+
+    It cannot collide with a plaintext frame: a ``ProtocolHeader`` opens with
+    ``Version`` as a little-endian ``uint32``, so the only version this library
+    speaks, 3, puts ``03 00 00 00`` on the wire and fails the first test.  For a
+    header to pass, ``Version`` would have to be ``0x01030316`` -- about 17
+    million, which the decoder rejects anyway.
+
+    Fewer than :data:`TLS_PEEK_BYTES` bytes is False: a connection that closed
+    mid-peek is not a TLS connection, it is a connection that closed.
+    """
+    return (
+        len(head) >= TLS_PEEK_BYTES
+        and head[0] == 0x16
+        and head[1] == 0x03
+        and head[2] in (1, 2, 3, 4)
+        and head[5] == 0x01
+    )
+
+
+def server_ssl_context(
+    certfile: str, keyfile: str | None = None, *, password: str | None = None
+) -> ssl.SSLContext:
+    """A server context matching the vendor gateway's TLS settings.
+
+    TLS 1.3 only, which is what the gateway's ``MinVersion: 0x0304`` and the
+    device parameter's own description (``"TLS mode: 0=disabled, 1=TLS 1.3"``)
+    both say, and no client certificate: the protocol has no device identity to
+    check one against.
+
+    The gateway also names three curves -- P-521, P-384, P-256 -- which this
+    deliberately does **not** narrow to.  OpenSSL's default group list is a
+    superset of those three, and pinning it to the vendor's list could only
+    ever reject a device, never admit one.
+    """
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_3
+    context.verify_mode = ssl.CERT_NONE
+    context.load_cert_chain(certfile, keyfile, password=password)
+    return context
 
 EventHandler = Callable[[DeviceConnection, list[Event]], Awaitable[None] | None]
 
@@ -111,6 +176,27 @@ class ServerStats:
     rejected: int = 0
     """Connections closed on a protocol violation."""
 
+    tls_accepted: int = 0
+    """Connections whose TLS handshake completed."""
+
+    tls_failed: int = 0
+    """Connections that offered a ClientHello and then failed the handshake.
+
+    A device that **rejects our certificate** lands here, and the logged
+    ``SSLError`` names the alert it sent.
+    """
+
+    tls_unsupported: int = 0
+    """ClientHellos that arrived while no ``ssl_context`` was configured.
+
+    Non-zero means something -- almost certainly a sign with TCLV 145 set to 1
+    -- is trying to speak TLS to a plaintext-only listener and getting nowhere.
+    It is the counter that makes that specific mistake visible; see the module
+    docstring.
+    """
+
+    # Both are counted *inside* any TLS tunnel, so they measure the protocol
+    # rather than the wire: record framing and handshake traffic are excluded.
     bytes_in: int = 0
     bytes_out: int = 0
 
@@ -127,6 +213,131 @@ class ServerStats:
         return out
 
 
+class _TlsStream:
+    """TLS over a stream whose first bytes have already been read.
+
+    The sniff is why this exists.  ``loop.start_tls()`` hands the socket to
+    OpenSSL and OpenSSL reads from the socket, so the six ClientHello bytes we
+    consumed to *recognise* the ClientHello would be lost and the handshake
+    would fail on a malformed record.  Driving an :class:`ssl.SSLObject` over a
+    pair of :class:`ssl.MemoryBIO` instead puts us in charge of what OpenSSL
+    sees, and the first thing it sees is those six bytes.
+
+    The cost is that we pump bytes by hand.  The upside is that the object
+    quacks exactly like the ``StreamReader``/``StreamWriter`` pair the read loop
+    already uses -- ``read``, ``write``, ``drain``, ``close``, ``wait_closed``,
+    ``get_extra_info`` -- so nothing above it knows the difference.
+    """
+
+    def __init__(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        context: ssl.SSLContext,
+        head: bytes,
+    ) -> None:
+        self._reader = reader
+        self._writer = writer
+        self._incoming = ssl.MemoryBIO()
+        self._outgoing = ssl.MemoryBIO()
+        self._tls = context.wrap_bio(
+            self._incoming, self._outgoing, server_side=True
+        )
+        self._incoming.write(head)
+        self._eof = False
+
+    def get_extra_info(self, name: str, default: object = None) -> object:
+        if name == "ssl_object":
+            return self._tls
+        return self._writer.get_extra_info(name, default)
+
+    # -- the byte pump ---------------------------------------------------
+
+    async def _send_pending(self) -> None:
+        """Flush whatever OpenSSL wants on the wire."""
+        data = self._outgoing.read()
+        if data:
+            self._writer.write(data)
+            await self._writer.drain()
+
+    async def _receive_more(self) -> bool:
+        """Feed one socket read into OpenSSL. False at EOF."""
+        if self._eof:
+            return False
+        data = await self._reader.read(READ_CHUNK)
+        if not data:
+            self._eof = True
+            self._incoming.write_eof()
+            return False
+        self._incoming.write(data)
+        return True
+
+    async def handshake(self) -> None:
+        """Complete the handshake, or raise.
+
+        Raises:
+            ssl.SSLError: the handshake failed. If the device rejected our
+                certificate this is where it shows up, and the message carries
+                the alert the device sent.
+            ssl.SSLEOFError: the device hung up mid-handshake, which is what a
+                stack that dislikes the certificate but sends no alert looks
+                like.
+        """
+        while True:
+            try:
+                self._tls.do_handshake()
+            except ssl.SSLWantReadError:
+                await self._send_pending()
+                if not await self._receive_more():
+                    raise ssl.SSLEOFError(
+                        "the device closed the connection during the TLS handshake"
+                    )
+            else:
+                await self._send_pending()
+                return
+
+    # -- the StreamReader / StreamWriter surface -------------------------
+
+    async def read(self, n: int = READ_CHUNK) -> bytes:
+        """Up to *n* plaintext bytes; ``b""`` at end of stream."""
+        while True:
+            try:
+                return self._tls.read(n)
+            except ssl.SSLWantReadError:
+                await self._send_pending()
+                if not await self._receive_more():
+                    return b""
+            except (ssl.SSLZeroReturnError, ssl.SSLSyscallError):
+                return b""
+
+    def write(self, data: bytes) -> None:
+        """Encrypt *data* into the outgoing BIO. ``drain()`` puts it on the wire.
+
+        The loop is for a full-screen push: ``SSL_write`` reports how much it
+        took, and a 1.84 MB frame is not something to assume it swallows whole.
+        """
+        view = memoryview(data)
+        while view:
+            view = view[self._tls.write(view) :]
+
+    async def drain(self) -> None:
+        await self._send_pending()
+
+    def close(self) -> None:
+        # close_notify is best-effort: unwrap() wants a round trip we are not
+        # going to wait for on a teardown path, and the device does not care.
+        with contextlib.suppress(Exception):
+            self._tls.unwrap()
+        with contextlib.suppress(Exception):
+            data = self._outgoing.read()
+            if data:
+                self._writer.write(data)
+        self._writer.close()
+
+    async def wait_closed(self) -> None:
+        await self._writer.wait_closed()
+
+
 class VisionectServer:
     """Accepts device connections and drives a ``DeviceConnection`` per socket.
 
@@ -137,6 +348,15 @@ class VisionectServer:
             your own if you want state to outlive the server object.
         config: passed to each :class:`DeviceConnection`.
         host / port: where to listen.
+        ssl_context: enables opportunistic TLS on the **same** port. Each
+            connection is sniffed for a ClientHello and wrapped only if it is
+            one, so plaintext signs keep working while TLS signs are added.
+            Omit it and the listener is plaintext-only, which is the default
+            because the vendor's own image ships no certificate and the device
+            side needs TCLV 145 set before any sign will offer a ClientHello.
+        certfile / keyfile: a shorthand for
+            ``ssl_context=server_ssl_context(certfile, keyfile)``. Mutually
+            exclusive with *ssl_context*.
         clock: seconds-valued monotonic clock. Injectable for tests; this is the
             **only** place the library reads a clock.
 
@@ -157,6 +377,9 @@ class VisionectServer:
         config: ConnectionConfig | None = None,
         host: str = "0.0.0.0",
         port: int = DEFAULT_PORT,
+        ssl_context: ssl.SSLContext | None = None,
+        certfile: str | None = None,
+        keyfile: str | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.on_events = on_events
@@ -164,6 +387,11 @@ class VisionectServer:
         self.config = config or ConnectionConfig()
         self.host = host
         self.port = port
+        if ssl_context is not None and certfile is not None:
+            raise ValueError("pass ssl_context or certfile, not both")
+        if ssl_context is None and certfile is not None:
+            ssl_context = server_ssl_context(certfile, keyfile)
+        self.ssl_context = ssl_context
         self.clock = clock
         self.stats = ServerStats()
         self._server: asyncio.AbstractServer | None = None
@@ -256,6 +484,22 @@ class VisionectServer:
 
     # --------------------------------------------------------------------
 
+    async def _peek(self, reader: asyncio.StreamReader) -> bytes:
+        """The first :data:`TLS_PEEK_BYTES` bytes, or fewer at EOF.
+
+        ``readexactly`` is wrong here: a connection that closes having sent
+        nothing is **normal** on this hardware (see
+        :attr:`ServerStats.silent_connections`), and that must not arrive as an
+        ``IncompleteReadError``.
+        """
+        head = b""
+        while len(head) < TLS_PEEK_BYTES:
+            chunk = await reader.read(TLS_PEEK_BYTES - len(head))
+            if not chunk:
+                break
+            head += chunk
+        return head
+
     async def _handle_client(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
@@ -266,10 +510,54 @@ class VisionectServer:
         log.info("device connected from %s", peer)
         registered: bytes | None = None
         received_any = False
+
+        # The sniff, before anything else and before the timers start: this is
+        # the only point at which the connection's protocol is still undecided.
+        head = await self._peek(reader)
+        if looks_like_client_hello(head):
+            if self.ssl_context is None:
+                self.stats.tls_unsupported += 1
+                log.error(
+                    "device %s offered a TLS ClientHello but this listener has "
+                    "no certificate configured. The sign has TCLV 145 (TLS "
+                    "mode) set to 1 and cannot talk to us until either a "
+                    "certificate is configured here or 145 is set back to 0 "
+                    "over the serial console.",
+                    peer,
+                )
+                writer.close()
+                with contextlib.suppress(Exception):
+                    await writer.wait_closed()
+                return
+            tls = _TlsStream(reader, writer, self.ssl_context, head)
+            try:
+                await tls.handshake()
+            except (ssl.SSLError, OSError) as exc:
+                self.stats.tls_failed += 1
+                log.warning("TLS handshake with %s failed: %s", peer, exc)
+                writer.close()
+                with contextlib.suppress(Exception):
+                    await writer.wait_closed()
+                return
+            self.stats.tls_accepted += 1
+            cipher = tls.get_extra_info("ssl_object")
+            log.info(
+                "device %s completed a TLS handshake (%s)",
+                peer,
+                cipher.cipher() if cipher is not None else "?",
+            )
+            # Everything above here is bytes on the wire; everything below is
+            # the protocol, and it does not care which of the two it is on.
+            reader = writer = tls  # type: ignore[assignment]
+            head = b""
+
         timer_task = asyncio.create_task(self._run_timers(conn, writer))
         try:
             while not conn.closed:
-                data = await reader.read(READ_CHUNK)
+                if head:
+                    data, head = head, b""
+                else:
+                    data = await reader.read(READ_CHUNK)
                 if not data:
                     break
                 received_any = True

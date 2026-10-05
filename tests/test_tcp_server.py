@@ -8,13 +8,17 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import logging
 import socket
+import ssl
 import struct
+from pathlib import Path
 
 import pytest
 
 from pyvisionect.devices.enums import PacketType
 from pyvisionect.io import DEFAULT_PORT, VisionectServer
+from pyvisionect.io.tcp import looks_like_client_hello, server_ssl_context
 from pyvisionect.packets import StatusPacket
 from pyvisionect.session import DeviceConnected, DeviceStateStore
 from pyvisionect.wire import Compression, DataHeader, Direction, encode_frame
@@ -279,3 +283,276 @@ def test_flush_pushes_work_queued_outside_the_read_loop() -> None:
             await server.close()
 
     asyncio.run(asyncio.wait_for(scenario(), timeout=10.0))
+
+
+# --------------------------------------------------------------- TLS
+
+
+CERT = Path(__file__).parent / "data" / "test-tls-cert.pem"
+KEY = Path(__file__).parent / "data" / "test-tls-key.pem"
+
+
+def client_hello_prefix() -> bytes:
+    """The six bytes the sniffer looks at, for a TLS 1.3 ClientHello.
+
+    ``16`` handshake record, ``03 01`` the legacy record version TLS 1.3 still
+    puts on the wire, two length bytes, ``01`` ClientHello.
+    """
+    return bytes([0x16, 0x03, 0x01, 0x02, 0x00, 0x01])
+
+
+def test_the_sniffer_matches_the_vendors_test() -> None:
+    assert looks_like_client_hello(client_hello_prefix())
+    # Every legacy record version the gateway accepts.
+    for minor in (1, 2, 3, 4):
+        assert looks_like_client_hello(bytes([0x16, 0x03, minor, 0, 0, 0x01]))
+    # And the ones it does not.
+    assert not looks_like_client_hello(bytes([0x16, 0x03, 0x00, 0, 0, 0x01]))
+    assert not looks_like_client_hello(bytes([0x16, 0x03, 0x05, 0, 0, 0x01]))
+    assert not looks_like_client_hello(bytes([0x17, 0x03, 0x03, 0, 0, 0x01]))
+    assert not looks_like_client_hello(bytes([0x16, 0x03, 0x03, 0, 0, 0x02]))
+    # Short is not TLS, it is a connection that closed.
+    assert not looks_like_client_hello(b"")
+    assert not looks_like_client_hello(client_hello_prefix()[:5])
+
+
+def test_a_real_protocol_header_is_not_mistaken_for_a_client_hello() -> None:
+    """``Version`` is a LE uint32, so version 3 is ``03 00 00 00`` on the wire.
+
+    That is the collision worth being explicit about: the sniffer's first test
+    is on byte 0, and byte 0 of every frame this library speaks is ``0x03``.
+    """
+    frame = status_frame()
+    assert frame[:4] == b"\x03\x00\x00\x00"
+    assert not looks_like_client_hello(frame[:6])
+    # Belt and braces: no prefix of a real frame passes the test.
+    for n in range(0, 64):
+        assert not looks_like_client_hello(frame[n : n + 6])
+
+
+def test_tls_and_plaintext_clients_share_one_listener() -> None:
+    """One port, both protocols, decided per connection by the first 6 bytes."""
+
+    async def scenario() -> None:
+        server, port, seen = await _serve(certfile=str(CERT), keyfile=str(KEY))
+        try:
+            # --- plaintext, exactly as before -------------------------------
+            plain_reader, plain_writer = await asyncio.open_connection(
+                "127.0.0.1", port
+            )
+            plain_writer.write(status_frame())
+            await plain_writer.drain()
+            ack = await asyncio.wait_for(plain_reader.read(4096), timeout=2.0)
+            version, _sec, comp, _len, _ck = struct.unpack_from("<5I", ack, 0)
+            assert version == 3 and comp == Compression.LZ4
+
+            # --- TLS, same port ---------------------------------------------
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            tls_reader, tls_writer = await asyncio.open_connection(
+                "127.0.0.1", port, ssl=context
+            )
+            tls_writer.write(status_frame(packet_id=2))
+            await tls_writer.drain()
+            ack = await asyncio.wait_for(tls_reader.read(4096), timeout=5.0)
+            version, _sec, comp, _len, _ck = struct.unpack_from("<5I", ack, 0)
+            assert version == 3 and comp == Compression.LZ4
+
+            assert server.stats.accepted == 2
+            assert server.stats.identified == 2
+            assert server.stats.tls_accepted == 1
+            assert server.stats.tls_failed == 0
+            assert server.stats.tls_unsupported == 0
+            assert sum(isinstance(e, DeviceConnected) for e in seen) == 2
+
+            plain_writer.close()
+            tls_writer.close()
+        finally:
+            await server.close()
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=20.0))
+
+
+def test_a_push_survives_the_tunnel() -> None:
+    """Server-to-device traffic has to come back out of the TLS stream intact.
+
+    A read-params request is the smallest frame the server originates, and it
+    exercises the ``write`` / ``drain`` path that a 1.84 MB image push uses.
+    """
+
+    async def scenario() -> None:
+        server, port, _ = await _serve(certfile=str(CERT), keyfile=str(KEY))
+        try:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            reader, writer = await asyncio.open_connection(
+                "127.0.0.1", port, ssl=context
+            )
+            writer.write(status_frame())
+            await writer.drain()
+            await asyncio.wait_for(reader.read(4096), timeout=5.0)  # the ack
+
+            conn = server.connection_for(UUID)
+            assert conn is not None
+            conn.read_params([29])
+            await server.flush(UUID)
+            data = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            version, _sec, _comp, _len, _ck = struct.unpack_from("<5I", data, 0)
+            assert version == 3
+            writer.close()
+        finally:
+            await server.close()
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=20.0))
+
+
+@pytest.mark.parametrize("abort", [False, True])
+def test_closing_with_a_tls_client_still_connected_does_not_hang(abort: bool) -> None:
+    """The ``close_clients()`` regression, again, with TLS in the way.
+
+    Worth its own case: a TLS connection holds an ``SSLObject`` and a second
+    layer of transport, and the sign holds it open just as permanently.
+    """
+
+    async def scenario() -> None:
+        server, port, _ = await _serve(certfile=str(CERT), keyfile=str(KEY))
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        reader, writer = await asyncio.open_connection("127.0.0.1", port, ssl=context)
+        try:
+            writer.write(status_frame())
+            await writer.drain()
+            await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            assert server.stats.tls_accepted == 1
+            # Deliberately left open, exactly as a mains-powered sign does.
+            await asyncio.wait_for(server.close(abort=abort), timeout=5.0)
+        finally:
+            writer.close()
+            with _ignore():
+                await writer.wait_closed()
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=20.0))
+
+
+def test_a_client_hello_without_a_certificate_is_counted_and_said_out_loud(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The one way to strand a sign: TCLV 145 on, no certificate here.
+
+    Without the counter this is a silent ``rejected``, indistinguishable from a
+    port scanner, and the sign is unreachable until someone finds a USB cable.
+    """
+
+    async def scenario() -> None:
+        server, port, seen = await _serve()
+        try:
+            assert server.ssl_context is None
+            _reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.write(client_hello_prefix() + b"\x00" * 64)
+            await writer.drain()
+            await asyncio.sleep(0.1)
+            assert server.stats.accepted == 1
+            assert server.stats.tls_unsupported == 1
+            assert server.stats.identified == 0
+            assert seen == []
+            writer.close()
+        finally:
+            await server.close()
+
+    with caplog.at_level(logging.ERROR, logger="pyvisionect.io.tcp"):
+        asyncio.run(asyncio.wait_for(scenario(), timeout=10.0))
+    assert "TCLV 145" in caplog.text
+
+
+def test_a_failed_handshake_is_counted_not_raised() -> None:
+    """A device that dislikes the certificate must not take the listener down."""
+
+    async def scenario() -> None:
+        server, port, _ = await _serve(certfile=str(CERT), keyfile=str(KEY))
+        try:
+            # A well-formed ClientHello prefix followed by rubbish: OpenSSL
+            # rejects the record and the connection dies, alone.
+            _reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.write(client_hello_prefix() + b"\xff" * 512)
+            await writer.drain()
+            await asyncio.sleep(0.2)
+            assert server.stats.tls_failed == 1
+            assert server.stats.tls_accepted == 0
+            writer.close()
+
+            # And the listener still works, in both protocols.
+            reader2, writer2 = await asyncio.open_connection("127.0.0.1", port)
+            writer2.write(status_frame())
+            await writer2.drain()
+            ack = await asyncio.wait_for(reader2.read(4096), timeout=2.0)
+            assert len(ack) > 20
+            writer2.close()
+        finally:
+            await server.close()
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=20.0))
+
+
+def test_a_silent_connection_is_still_silent_with_tls_configured() -> None:
+    """The peek must not turn the normal zero-byte connection into an error."""
+
+    async def scenario() -> None:
+        server, port, seen = await _serve(certfile=str(CERT), keyfile=str(KEY))
+        try:
+            _reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.close()
+            await asyncio.sleep(0.1)
+            assert server.stats.accepted == 1
+            assert server.stats.silent_connections == 1
+            assert server.stats.rejected == 0
+            assert server.stats.tls_failed == 0
+            assert seen == []
+        finally:
+            await server.close()
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=10.0))
+
+
+def test_a_frame_split_across_the_peek_boundary_still_decodes() -> None:
+    """The peek eats the first 6 bytes; they have to come back in order.
+
+    Writing a frame three bytes at a time is the cheap way to prove it, since
+    the sniff then necessarily straddles two socket reads.
+    """
+
+    async def scenario() -> None:
+        server, port, seen = await _serve(certfile=str(CERT), keyfile=str(KEY))
+        try:
+            frame = status_frame()
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            for i in range(0, len(frame), 3):
+                writer.write(frame[i : i + 3])
+                await writer.drain()
+            ack = await asyncio.wait_for(reader.read(4096), timeout=2.0)
+            assert len(ack) > 20
+            assert server.stats.identified == 1
+            assert any(isinstance(e, DeviceConnected) for e in seen)
+            writer.close()
+        finally:
+            await server.close()
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=10.0))
+
+
+def test_ssl_context_and_certfile_are_mutually_exclusive() -> None:
+    with pytest.raises(ValueError, match="not both"):
+        VisionectServer(
+            on_events=lambda c, e: None,
+            ssl_context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER),
+            certfile=str(CERT),
+        )
+
+
+def test_server_ssl_context_is_tls_13_only_and_asks_for_no_client_cert() -> None:
+    """Matches the gateway's ``MinVersion: 0x0304`` and parameter 145's name."""
+    context = server_ssl_context(str(CERT), str(KEY))
+    assert context.minimum_version is ssl.TLSVersion.TLSv1_3
+    assert context.verify_mode is ssl.CERT_NONE
