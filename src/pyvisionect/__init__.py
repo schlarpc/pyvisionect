@@ -34,7 +34,7 @@ Quick start::
     asyncio.run(VisionectServer(on_events=on_events).serve_forever())
 
 The sign must be *pointed* at your listener first, either over USB
-(:class:`pyvisionect.io.usb.UsbProvisioner`) or by re-pointing the DNS name it
+(:mod:`pyvisionect.io.usb`) or by re-pointing the DNS name it
 already holds in flash.  The server address is read-only over the network; see
 :mod:`pyvisionect.devices.tclv`.
 

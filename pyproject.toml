@@ -41,7 +41,8 @@ usb = ["pyserial>=3.5"]
 test = ["pytest>=7.0", "dpkt>=1.9"]
 
 [project.scripts]
-pyvisionect-provision = "pyvisionect.io.usb:main"
+pyvisionect-usb = "pyvisionect.io.usb.cli:main"
+pyvisionect-provision = "pyvisionect.io.usb.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pyvisionect"]

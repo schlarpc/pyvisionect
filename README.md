@@ -326,50 +326,167 @@ since only *writes* are blocked.
 
 ### Route 2 — USB
 
-A USB-to-UART bridge on the Micro-USB connector, **115200 8N1**, carrying a
-line-oriented ASCII command shell.
+An **FTDI FT232** (`0403:6001`, confirmed with `lsusb`) on the Micro-USB
+connector, **115200 8N1**, carrying a line-oriented ASCII shell. Everything in
+this section was measured on a live 32" sign running firmware **7.4.4407**.
 
 ```sh
-pyvisionect-provision /dev/ttyUSB0 --dump            # flash_print; changes nothing
-pyvisionect-provision /dev/ttyUSB0 \
-    --ssid MyNetwork --psk 's3cret' \
-    --server homeassistant.local --server-port 11113
+pyvisionect-usb ports                 # find candidate ports
+pyvisionect-usb identify /dev/ttyUSB0 # confirm it is a sign (2 read-only commands)
+pyvisionect-usb dump /dev/ttyUSB0     # read every readable setting
+pyvisionect-usb commands              # the 111 commands this firmware has
+
+# Provisioning prints the plan and exits. --execute to actually do it.
+pyvisionect-usb provision /dev/ttyUSB0 \
+    --ssid MyNetwork --psk 's3cret' --server homeassistant.local
 ```
 
-or from Python:
+From Python, read-only (the default — it cannot change anything):
 
 ```python
-from pyvisionect.io.usb import UsbProvisioner
+from pyvisionect.io.usb import SerialConsole, Sign
 
-with UsbProvisioner("/dev/ttyUSB0") as cli:
-    print(cli.flash_print())                 # dump every stored setting first
-    cli.repoint("MyNetwork", "s3cret", "homeassistant.local", 11113)
+with SerialConsole("/dev/ttyUSB0") as console:
+    console.sync()
+    sign = Sign(console)
+    info = sign.dump()
+    print(info.describe())
+    print(info.wifi.ssid, info.server.host, info.status.rssi_dbm)
 ```
 
-`repoint` is the vendor's own sequence: `wifi_conf_set` -> `server_tcp_set` ->
-**`flash_save`** -> `reboot`. The `flash_save` is not optional — verbatim from
-the vendor documentation: *"All changes to device configuration are by default
-retained only in the working RAM."*
+Every getter returns a dataclass, not a string. Writing needs a flag, and the
+flag named in the refusal is the gentlest one that would work:
 
-Things to expect:
+```python
+sign = Sign(console)                            # reads only
+sign = Sign(console, allow_writes=True)         # + ordinary setters
+sign = Sign(console, allow_destructive=True)    # + network/panel/lifecycle
+sign = Sign(console, i_really_mean_it=True)     # + formats, firmware, passwords
+```
 
-- **Soft sleep will kill your console** after about 15 seconds of accelerometer
-  inactivity. `cli.sleep_mode_set(1)` ("CLI & CPU always on") for a working
-  session, and put it back afterwards.
-- **The VID/PID and kernel driver are unverified.** macOS names the node
-  `/dev/cu.usbserial-XXXXXXXX`, which is FTDI/Prolific naming rather than
-  CDC-ACM, pointing at VID `0x0403` — but that is an inference from a filename.
-  Check `lsusb` and `dmesg`.
-- **The prompt string, line terminator and echo behaviour are undocumented.**
-  `UsbProvisioner` reads until the port goes quiet rather than until a prompt,
-  and `terminator` is settable.
-- **Destructive commands are refused by default**: `cc3100_format`, every
-  `*_upgrade`, `feat_disable`, `flash_erase`, `cli_pwd_reset`, and shipping mode
-  (`SYS_SHIP_MODE = 1`). Pass `allow_destructive=True` or
-  `--allow-destructive` if you really mean it.
-- `cli.send_status_packet()` (`pss`) makes the device emit a status packet on
-  demand, which is very useful while bringing a listener up — it decouples your
-  work from the 60-second heartbeat.
+Provisioning is a plan you read before you run:
+
+```python
+from pyvisionect.io.usb import plan_repoint
+
+plan = plan_repoint("homeassistant.local")
+print(plan.describe())      # every command, what it does, and what it costs
+plan.execute(Sign(console, allow_destructive=True))
+```
+
+`plan_repoint` is `server_tcp_set` -> **`flash_save`** -> `reboot`. The
+`flash_save` is not optional — verbatim from the vendor: *"All changes to device
+configuration are by default retained only in the working RAM."* Which cuts both
+ways: until it runs, a power-cycle undoes everything.
+
+#### The firmware has 111 of the 160 documented commands
+
+`help` on the device is the only authority — commands are compiled in behind
+switches. The delta is in `pyvisionect.io.usb.commands` as data
+(`ABSENT_FROM_7_4_4407`, `UNDOCUMENTED_IN_7_4_4407`), and two gaps change
+documented advice:
+
+- **`wifi_ssid_set` does not exist.** It is the vendor's documented workaround
+  for an SSID containing a space, and without it there is **no way to set such
+  an SSID over USB on this firmware** — `wifi_conf_set` and `wifi_psk_set` share
+  the same whitespace-delimited parser. `plan_wifi` refuses up front and says so
+  rather than letting the device store a truncated SSID.
+- **`flash_print` does not exist**, so there is no one-shot settings dump.
+  `Sign.dump()` walks the per-area getters instead.
+
+Going the other way, 47 present commands are undocumented, including all three
+`encryption_*` commands, the whole `fs_*` family and the four `vlog_*` log-level
+controls.
+
+#### `sf_rdid` and `sf_rdst` kill the console
+
+Measured, the hard way. Both assert immediately — `assert: spi_flash_cli.c:139`
+and `:188` — because neither checks that `sf_select` has chosen a device first.
+The assertion kills `usb_cli_task`: the prompt never returns, and the software
+watchdog notices (`W WD task timeout: cli_USB` appears on the UART) without
+acting on it. The sign itself is fine throughout — it stays on the network,
+keeps its heartbeat and keeps its picture — and the console comes back only when
+the device reboots, which it does on its own roughly 25 minutes later.
+
+Both are gated behind `i_really_mean_it` for that reason alone; they read
+nothing and write nothing. `sf_list` is fine.
+
+#### Asynchronous log lines, and why this is the hard part
+
+The firmware logs to the same UART, unprompted. A heartbeat fires every minute
+and dumps eight lines; an image push adds a `Profiling:` line. Any of them can
+land in the middle of a reply, so "every line between my command and the prompt
+is my answer" corrupts *intermittently* — which is the worst failure mode,
+because it passes every test you write by hand.
+
+`SerialConsole` separates the streams with four mechanisms, and only the last
+one is a heuristic:
+
+1. **Drain before send** — bytes buffered before the write cannot be the reply.
+2. **Echo anchor** — the device echoes the command line; the reply starts there.
+3. **Prompt terminator** — the reply ends at a `"> "` starting a line.
+4. **Pattern match** — lines inside the frame matching `LOG_PATTERNS` (every
+   entry taken from a real capture) move to the log stream.
+
+`CommandResult` carries `lines` (yours), `logs` (the firmware's) and `raw` (both,
+lossless). There is also an `on_log` callback and a `logs` history.
+
+The clean fix is to turn the log sink off, which the firmware supports:
+`Sign.quiet_logs()` sends `vlog_unify_levels 0`. That is a write, so it is gated,
+and the level scale was not confirmed on hardware.
+
+#### Line discipline, measured
+
+- **CR (`\r`) submits. LF does not.** `cli_version_get\n` is echoed and then
+  *held* in the edit buffer, so the next command is appended to it and the pair
+  is rejected as one unrecognised word. `\r\n` works but leaves a stray LF that
+  pollutes the next read, so the terminator is a bare `\r`.
+- The prompt is `"> "`, with no trailing newline. The device echoes. Commands
+  are case-insensitive.
+- **Only some commands emit `rv:`, and not always last** — `certs_config_get`
+  prints `rv: 0` *before* its body. It comes in two spellings in one firmware,
+  `rv: 0` and `rv: 0x0`.
+- Two error strings, and they quote `help` differently:
+  `Command 'x' not recognised.  Enter 'help' ...` and
+  `Incorrect command parameter(s).  Enter "help" ...`
+
+#### Soft sleep did not happen
+
+The vendor documents a soft sleep that cuts the console after 15 seconds of
+accelerometer inactivity, and recommends setting `SLEEP_MODE` (52) to 1 for a
+working session. **It did not bite on 7.4.4407.** A console held its prompt
+across an undisturbed 45-second idle and answered immediately after, on a sign
+whose uptime had been 25 days — so the CLI had been reachable that whole time
+untouched. This library therefore sends no keepalive and does not touch TCLV 52,
+both of which would be writes on a read-only session.
+
+#### Encryption: the USB key is not the way in
+
+`encryption_mode_set` takes **0 or 1** — that is solid, it is TCLV 130, whose
+vendor description reads *"Outbound encryption: 0=Disabled, 1=Enabled"*. Note
+that is a boolean and **not** the wire protocol's `SecurityType` (0/2/3).
+
+The key format is **not** solid. The primitive is AES-128, so 16 bytes; the CLI
+takes one whitespace-delimited token and `encryption_config_get` echoes it back
+in single quotes, so it is stored as a printable string. The best-supported
+reading is **16 printable ASCII characters used verbatim**, because every other
+key and IV in this system is exactly that (`F@%gtb7;xLmXV$9a`,
+`thisbeemulatorke`, `N3ls0#!Dba0f8*B>`). Base64 (24 chars) is second — it is how
+the gateway serialises such a key for escrow. None of this was tested.
+
+And the conclusion that matters: **setting the key over USB does not buy you
+self-hosted link encryption.** The gateway encrypts with 16 `crypto/rand` bytes
+minted fresh per activation and never transmits them; it sends the escrow
+service's opaque response verbatim and the device is expected to resolve it
+using what it already holds. TCLV 131 is that long-term secret, not the session
+key, and reproducing the resolution means reading firmware that ships encrypted.
+Use **TLS** instead: TCLV 145 is *"TLS mode: 0=disabled, 1=TLS 1.3"*, it is
+network-writable (no USB needed), the gateway's TLS is opportunistic on the same
+port, and there is no certificate pinning on the device link.
+
+`pyvisionect.io.usb.encryption` holds all of this with its provenance, and
+`pyvisionect-usb encryption` prints it. No setter in that module has ever been
+executed.
 
 ## Protocol notes worth knowing
 
@@ -632,11 +749,33 @@ Also covered: round-trip property tests on every codec, the direction-dependent
 checksum against its captured constants, the 235-entry TCLV table, the session
 state machine (acks, NACKs, reconnect-by-UUID, all three timers), the
 pending-work queue (every coalescing rule, the connect ordering, ack/NACK
-bookkeeping, persistence), `FrameState` and `DeviceState` serialisation, the USB
-provisioner against a fake serial port, the listener over real loopback sockets
+bookkeeping, persistence), `FrameState` and `DeviceState` serialisation, the listener over real loopback sockets
 (bind errors, stats, flush), and an AST scan that fails the build if anything in
 `wire/`, `packets/`, `session/` or `devices/` grows an I/O import or a clock
 call.
+
+The USB package has its own 274 tests in `tests/usb/`, run against a fake
+transport that replays **real captured frames** from a live sign
+(`pyvisionect.io.usb.fake`, scrubbed of identifiers and otherwise untouched).
+That matters more than it sounds: a fixture written by hand from a parser's point
+of view tests the parser against its own assumptions. Several parsers are shaped
+the way they are only because of something visible in those captures and nowhere
+in the vendor's documentation — the blank line before `uuid_get`'s payload, the
+`rv: 0` that precedes `certs_config_get`'s body, the tab-separated `task_list`
+columns, the one `status_get` key with a space in it.
+
+The interleaving tests are the ones worth reading. The fake can splice the real
+eight-line heartbeat burst into the middle of a reply, before the echo, or into
+the buffer ahead of the write, and the tests assert that a parsed value comes out
+identical either way. There is also a test that runs the async-log classifier
+over **every line of every captured reply** and fails if it would swallow one,
+because a false positive there silently eats an answer.
+
+A further set of cross-checks compares two commands that report the same
+underlying value — `wifi_bssid_get` against `status_get`'s two BSSID words,
+`cc3100_rssi` against `SIGNAL_STRENGTH`, `fs_stats`' block count against
+`FS_TOTAL_SIZE`'s bytes. Those are what would catch a parser that is
+self-consistently wrong, and all of them were re-run against the live sign.
 
 One of those is a regression test for a **hang** rather than a wrong answer:
 `test_close_does_not_hang_with_a_client_still_connected` opens a client, leaves
