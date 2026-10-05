@@ -932,8 +932,31 @@ tracker forces a periodic full push.
 **What is assumed and unverified:** that newer firmware self-manages ghosting.
 The server's 120 s idle re-render ticker is armed *only for old firmware*, which
 implies the vendor believed so -- but that is the vendor's assumption, not a
-measurement. A10 saw 12 consecutive partials with no self-initiated refresh and
-no visible ghosting: suggestive, small sample.
+measurement. A10's first run saw 12 consecutive partials with no self-initiated
+refresh and no visible ghosting: suggestive, small sample.
+
+**Partly answered, and it is a negative** (2026-10-05, A10's second run). The
+console was correlated per push across the shipped encoder's validation: eight
+accepted partial pushes, twelve rectangles, both `ScreenID`s. Every single one
+was `wfn: 2, inv: 0` into exactly one `UPD_FULL_AREA` per rectangle. **No
+partial ever produced an `inv: 1`, a `Force Inverse and full area update` line
+or a `UPD_FULL` that the server did not ask for.** Over ~25 minutes the firmware
+initiated no clearing refresh at all. That does not prove it never will, but it
+does mean the forced-full policy is the only thing clearing the panel today, and
+it moves "the firmware probably handles it" from unverified to unsupported.
+
+**And a new question of its own: `inv: 1` is a request the firmware sometimes
+declines.** Five full-screen pushes in that run carried byte-identical headers
+with the bit clear, and the console parsed `inv: 1` on all five -- but only
+three emitted `Force Inverse and full area update` and ran 8 `UPD_FULL` passes
+(5298 ms). The other two logged no such line and ran 4 `UPD_FULL_AREA` passes
+(2916 ms). `ImgOpt` tracks the split (`0x00003024` granted, `0x00001124` not),
+which is more evidence that its undecoded bits carry something, but nothing is
+inferred from them here. Interval does not explain it: one grant came 4 minutes
+after the previous, one refusal 10 minutes after. So "force a full screen" means
+"ask for a clearing refresh", not "get one" -- which is a reason to keep the
+`max_consecutive_partials` default at the vendor's conservative 10 and a reason
+the long run below matters more, not less.
 
 **Unexplored levers.** `ImgOpt`'s other bits (`0x3000` vs `0x0100` differ beyond
 the inverse bit). And two serial commands never run, both on the do-not-run list
@@ -944,11 +967,13 @@ most direct route to the panel's own refresh machinery and the most likely to
 leave the display in a bad state, so they want a deliberate session with the
 owner present, not an autonomous probe.
 
-**Worth doing when someone is watching:** a long partial run (hundreds, not 12)
-with the serial console logging `UPD_*`/`wfn:`/`inv:` per push, to find out
-whether the firmware ever clears on its own and how much ghosting actually
-accumulates. That would turn the forced-full threshold from a precaution into a
-measured number.
+**Worth doing when someone is watching:** a long partial run (hundreds, not 20)
+with the serial console logging `UPD_*`/`wfn:`/`inv:` per push, to find out how
+much ghosting actually accumulates and what decides whether a requested inverse
+update is granted. `DirtyTracker` makes the run itself trivial now --
+`PartialPolicy(max_consecutive_partials=-1)` never forces a refresh -- so what
+it needs is a human watching the glass, not more code. That would turn the
+forced-full threshold from a precaution into a measured number.
 
 ### A8. The panel-boundary dark band — OPEN, partially characterised
 
