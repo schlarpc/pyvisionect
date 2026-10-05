@@ -69,6 +69,27 @@ the ``Options`` "normal update" bit is clear, so the firmware runs its
 ``UPD_FULL``).  A tracker that never forces a full refresh never clears, and
 the panel slowly turns to mush.
 
+A partial may not also ask for the clearing waveform
+---------------------------------------------------
+``RectangleHeader.Options`` bit ``0x0002`` **clear** means "inverse update"
+(``OPEN-QUESTIONS.md`` B1), and the vendor ships ``RectangleFlags = 0``, so the
+bit is clear on an ordinary push and the firmware runs its clearing waveform.
+On a rectangle smaller than the screen the firmware refuses outright::
+
+    l: (0 1168 160 512 128), enc: 0x4 pde: 0x0, te: 0x0
+    u: (0 1168 160 512 128), wfn: 2, dum: 1, inv: 1
+    Image download completed (0 0)
+    Skip image update: partial image not allowed
+    -> NACK, ErrorCode 0x06000000
+
+Which is reasonable: an inverse clearing refresh drives the whole panel, so
+"clear only this rectangle" is not a thing the waveform can do.  Measured on
+the sign on 2026-10-05; with bit ``0x0002`` **set** the same rectangle acks and
+draws.  So :func:`encode_partial_frame` **always sets the bit on a partial
+rectangle**, whatever ``rect_options`` says, and leaves ``rect_options``
+untouched on the full-screen fallback -- which is where you *want* the clearing
+waveform, and is what makes the ghosting budget work.
+
 Checksums
 ---------
 ``ImageHeader.Checksum`` is XXHash32 over the **whole 8-bit canvas state**, not
@@ -88,6 +109,7 @@ import numpy as np
 
 from .checksum import state_checksum
 from .constants import (MAX_NO_FULL_UPDATE, MAX_REGIONS_PER_DISPLAY,
+                        OPTION_NORMAL_UPDATE,
                         RECTANGLE_UPDATE_OPTIONS_DEFAULT, Dithering,
                         ImageType)
 from .encoder import EncodedFrame, EncodedRect, FrameState, _validate
@@ -574,6 +596,11 @@ def encode_partial_frame(
         screen rather than raising.
     :param rects: dirty rectangles in **canvas** coordinates, if you already
         know them.  ``None`` means change-detect against ``prev_state``.
+    :param rect_options: ``RectangleHeader.Options``.  On a partial rectangle
+        the "normal update" bit :data:`~.constants.OPTION_NORMAL_UPDATE` is
+        **always added**, because the firmware refuses a partial that also
+        asks for the inverse clearing waveform (see the module docstring).  On
+        the full-screen fallback it is passed through untouched.
     :param policy: a :class:`PartialPolicy`; ``None`` uses the defaults.
     :param consecutive_partials: partials pushed since the last full-screen
         frame.  :class:`DirtyTracker` keeps this for you.
@@ -647,7 +674,8 @@ def encode_partial_frame(
     if not panel.interlace_mode:
         frame = _encode_frame(
             img, panel=panel, encoding=enc, dithering=dith, rects=dirty,
-            prev_state=prev_state, inverse=False, rect_options=rect_options,
+            prev_state=prev_state, inverse=False,
+            rect_options=int(rect_options) | OPTION_NORMAL_UPDATE,
             image_type=image_type,
             rectangle_update_options=rectangle_update_options,
             change_threshold=change_threshold, merge_regions=merge_regions,
@@ -701,7 +729,12 @@ def encode_partial_frame(
     _apply_to_state(state, grey, dirty, panel, enc, dith,
                     quant_canvas=quant_canvas, dither_levels=dither_levels)
 
-    options = int(rect_options)
+    # A partial that also requests the inverse clearing waveform is refused by
+    # the firmware ("Skip image update: partial image not allowed"), so the
+    # "normal update" bit is set here regardless of rect_options.  The
+    # full-screen fallback above keeps rect_options as given, which is what
+    # spends the ghosting budget on a clearing refresh.
+    options = int(rect_options) | OPTION_NORMAL_UPDATE
     out: list[EncodedRect] = []
     for screen_id, screen_rects in sorted(merged.items()):
         for rect in screen_rects:

@@ -22,7 +22,8 @@ import numpy as np
 import pytest
 
 from pyvisionect.imaging import (DRIVERS, INTERLACE_GROUP, MAX_NO_FULL_UPDATE,
-                                 PANEL_32INCH, SCREEN_X_QUANTUM, DirtyTracker,
+                                 OPTION_NORMAL_UPDATE, PANEL_32INCH,
+                                 SCREEN_X_QUANTUM, DirtyTracker,
                                  Dithering, Encoding, Panel, PartialPolicy,
                                  Rect, align_and_unite_screen_rects,
                                  align_screen_rect,
@@ -901,13 +902,71 @@ def test_a_tracker_can_resume_from_a_persisted_state():
 def test_the_tracker_forwards_its_encode_options():
     base = canvas()
     tracker = DirtyTracker(panel=P, encoding=4, dithering=Dithering.NONE,
-                           rect_options=0x0002,
+                           rect_options=0x0020,
                            rectangle_update_options=0x0999)
     tracker.update(base)
     frame = tracker.update(_changed(base))
     for rect in frame.rectangles:
-        assert rect.options == 0x0002
+        assert rect.options == 0x0020 | OPTION_NORMAL_UPDATE
         assert rect.rectangle_update_options == 0x0999
+
+
+# ==========================================================================
+# a partial may not also request the clearing waveform
+# ==========================================================================
+
+def test_a_partial_always_sets_the_normal_update_bit():
+    """Measured: with the bit clear the firmware refuses the rectangle.
+
+    ``Skip image update: partial image not allowed``, NACK ``0x06000000``,
+    with the console echoing ``inv: 1``.  With the bit set the same rectangle
+    acks and draws (2026-10-05, ``OPEN-QUESTIONS.md`` A10).  So the encoder
+    sets it whatever the caller passed; an inverse update is full-screen or it
+    is nothing.
+    """
+    base, first = _first()
+    for rect_options in (0, OPTION_NORMAL_UPDATE, 0x0020):
+        frame = encode_partial_frame(_changed(base), panel=P, encoding=4,
+                                     dithering=Dithering.NONE,
+                                     prev_state=first.state,
+                                     rect_options=rect_options)
+        assert frame.screen_space
+        assert frame.rectangles
+        for rect in frame.rectangles:
+            assert rect.options & OPTION_NORMAL_UPDATE
+            assert rect.options == rect_options | OPTION_NORMAL_UPDATE
+
+
+def test_the_full_screen_fallback_keeps_the_clearing_waveform():
+    """The fallback is where the ghosting budget is *spent*, so it must invert.
+
+    With the shipped ``RectangleFlags = 0`` the bit stays clear on the
+    full-screen frame, the firmware logs ``inv: 1`` and runs ``UPD_FULL``.
+    """
+    base, first = _first()
+    frame = encode_partial_frame(_changed(base), panel=P, encoding=4,
+                                 dithering=Dithering.NONE,
+                                 prev_state=first.state, rect_options=0,
+                                 policy=PartialPolicy(
+                                     max_consecutive_partials=0))
+    assert frame.full_screen and frame.fallback_reason == "ghosting-refresh-due"
+    for rect in frame.rectangles:
+        assert rect.options == 0
+        assert not rect.options & OPTION_NORMAL_UPDATE
+
+
+def test_a_flat_panel_partial_also_sets_the_bit():
+    base = canvas(FLAT)
+    first = encode_frame(base, panel=FLAT, encoding=4,
+                         dithering=Dithering.NONE)
+    changed = base.copy()
+    changed[4:12, 8:24] = 0
+    frame = encode_partial_frame(changed, panel=FLAT, encoding=4,
+                                 dithering=Dithering.NONE,
+                                 prev_state=first.state)
+    assert not frame.full_screen
+    for rect in frame.rectangles:
+        assert rect.options & OPTION_NORMAL_UPDATE
 
 
 def test_the_tracker_rejects_a_negative_counter():
