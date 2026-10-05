@@ -41,10 +41,50 @@ import struct
 from dataclasses import dataclass, field
 
 from ..devices.enums import PacketType, ParamControl
-from ..devices.tclv import check_writable, name_of
+from ..devices.tclv import (
+    DEFAULT_VALUE_WIDTH,
+    check_writable,
+    name_of,
+    width_of,
+)
 from ..wire.errors import PayloadError
 
-__all__ = ["ParamItem", "ParamPacket", "encode_value", "decode_value"]
+__all__ = [
+    "ParamItem",
+    "ParamPacket",
+    "encode_value",
+    "decode_value",
+    "PARAM_ERROR_NO_SUCH_PARAMETER",
+    "PARAM_ERROR_BAD_VALUE",
+    "PARAM_ERROR_NAMES",
+]
+
+PARAM_ERROR_NO_SUCH_PARAMETER = 0x00580000
+"""Error value for a parameter this firmware does not implement.
+
+Measured: reading 145 (``TLS mode``), 146 (``EPD count``) and the deliberately
+invented id 250 all came back ``control=2``, ``Length=4``,
+``value=00 00 58 00`` -- byte for byte identical. So the firmware answers
+"never heard of it" and "I have it but will not tell you" the same way, if it
+even distinguishes them.
+"""
+
+PARAM_ERROR_BAD_VALUE = 0x005A0000
+"""Error value for a parameter that exists but whose value was unacceptable.
+
+Measured: a **one-byte** write to 29 (``Heart beat interval``, a uint32) came
+back ``control=3``, ``value=00 00 5a 00``. The same id read back cleanly in the
+same session, so this is not "no such parameter" -- it is the width.
+
+That these two differ is what makes the parameter channel diagnosable at all:
+without it, "this firmware has no such setting" and "this library encoded the
+value wrongly" are the same symptom.
+"""
+
+PARAM_ERROR_NAMES: dict[int, str] = {
+    PARAM_ERROR_NO_SUCH_PARAMETER: "no such parameter on this firmware",
+    PARAM_ERROR_BAD_VALUE: "parameter exists, value rejected (wrong width?)",
+}
 
 _HDR = struct.Struct("<II")
 _ITEM = struct.Struct("<HBB")
@@ -73,6 +113,27 @@ class ParamItem:
     def is_error(self) -> bool:
         return self.control in (ParamControl.READ_ERROR, ParamControl.WRITE_ERROR)
 
+    @property
+    def error_code(self) -> int | None:
+        """The device's reason code on an error reply, else None.
+
+        Compare against :data:`PARAM_ERROR_NO_SUCH_PARAMETER` and
+        :data:`PARAM_ERROR_BAD_VALUE`. An unrecognised value is returned as-is
+        rather than mapped to anything: only two have been observed and there
+        is no table for the rest.
+        """
+        if not self.is_error:
+            return None
+        return self.as_int()
+
+    @property
+    def error_name(self) -> str | None:
+        """:attr:`error_code` as prose, or its hex if it is one we have not seen."""
+        code = self.error_code
+        if code is None:
+            return None
+        return PARAM_ERROR_NAMES.get(code, f"unknown reason 0x{code:08x}")
+
     def encode(self) -> bytes:
         return _ITEM.pack(self.id, self.control, len(self.value)) + self.value
 
@@ -90,13 +151,23 @@ class ParamItem:
 
 
 def encode_value(value: int | str | bytes, *, width: int | None = None) -> bytes:
-    """Best-effort value encoder.
+    """Value encoder.
 
     Args:
         value: ``bytes`` are passed through; ``str`` becomes bare ASCII with no
             terminator (that is what the capture shows); ``int`` becomes a
-            little-endian unsigned integer of *width* bytes (default: the
-            smallest of 1/2/4 that fits).
+            little-endian unsigned integer of *width* bytes.
+        width: bytes for an integer. Defaults to
+            :data:`~pyvisionect.devices.tclv.DEFAULT_VALUE_WIDTH`; callers that
+            know the parameter should pass
+            :func:`~pyvisionect.devices.tclv.width_of`, which
+            :meth:`ParamPacket.write` does for them.
+
+    The default used to be "the narrowest of 1/2/4 that fits the value", which
+    is wrong and was wrong silently. Width is a property of the **parameter**,
+    not of the value: the heartbeat (29) is a uint32 whose normal value is 1,
+    and a one-byte write to it comes back as a write error. See
+    :data:`~pyvisionect.devices.tclv.VALUE_WIDTHS`.
     """
     if isinstance(value, bytes):
         return value
@@ -106,7 +177,7 @@ def encode_value(value: int | str | bytes, *, width: int | None = None) -> bytes
         return bytes([int(value)])
     if isinstance(value, int):
         if width is None:
-            width = 1 if value < 0x100 else 2 if value < 0x10000 else 4
+            width = DEFAULT_VALUE_WIDTH
         return int(value).to_bytes(width, "little")
     raise TypeError(f"cannot encode {type(value).__name__} as a TCLV value")
 
@@ -152,7 +223,13 @@ class ParamPacket:
         for pid, value in values.items():
             if not allow_read_only:
                 check_writable(pid)
-            items.append(ParamItem(pid, ParamControl.WRITE, encode_value(value)))
+            items.append(
+                ParamItem(
+                    pid,
+                    ParamControl.WRITE,
+                    encode_value(value, width=width_of(pid)),
+                )
+            )
         return cls(items=items)
 
     @classmethod

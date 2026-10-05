@@ -32,6 +32,7 @@ from pyvisionect.packets import (
     StatusPacket,
     TouchPacket,
     decode_payload,
+    encode_value,
     screen_cache_name,
 )
 from pyvisionect.wire import PayloadError, ReadOnlyParameter
@@ -149,7 +150,38 @@ def test_param_write_override_is_explicit() -> None:
 def test_param_write_allows_a_writable_id() -> None:
     packet = ParamPacket.write({29: 5})
     assert packet.items[0].id == 29
-    assert packet.items[0].value == b"\x05"
+    assert packet.items[0].value == b"\x05\x00\x00\x00"
+
+
+def test_an_int_write_uses_the_parameters_width_not_the_values() -> None:
+    """The device answers a wrong-width write with its own error code.
+
+    Measured on a live sign: a one-byte write to 29 (a uint32) came back
+    ``control=3`` with value ``00 00 5a 00``, where a write to an id the
+    firmware does not implement comes back ``00 00 58 00``. So width is a
+    property of the parameter, and guessing it from the value -- which this
+    used to do -- silently loses every write of a small number to a wide
+    parameter.
+    """
+    assert ParamPacket.write({29: 1}).items[0].value == b"\x01\x00\x00\x00"
+    # The port is a uint16 whose normal value needs two bytes anyway, so the
+    # old heuristic happened to get this one right.
+    port = ParamPacket.write({19: 11113}, allow_read_only=True)
+    assert port.items[0].value == b"\x69\x2b"
+    # Ethernet TCP retry count is genuinely one byte.
+    assert ParamPacket.write({9: 8}).items[0].value == b"\x08"
+    # flash_save is command-shaped, and one byte is what the device has been
+    # accepting all along.
+    assert ParamPacket.write({53: 1}).items[0].value == b"\x01"
+    # An unmeasured id gets the uint32 default.
+    assert ParamPacket.write({250: 1}).items[0].value == b"\x01\x00\x00\x00"
+
+
+def test_an_explicit_width_still_wins() -> None:
+    assert encode_value(1, width=1) == b"\x01"
+    assert encode_value(1) == b"\x01\x00\x00\x00"
+    assert encode_value(b"\x01") == b"\x01"
+    assert encode_value("10.0.0.1") == b"10.0.0.1"
 
 
 def test_param_round_trip_property() -> None:

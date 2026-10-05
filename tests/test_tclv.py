@@ -71,3 +71,53 @@ def test_well_known_ids() -> None:
     assert tclv.ID_IPV4_SERVER_PORT == 19
     assert tclv.ID_CMD_FLASH_SAVE == 53
     assert tclv.ID_WIFI_SSID == 65
+
+
+# ------------------------------------------------- measured value widths
+
+
+def test_measured_widths_cover_the_parameters_the_library_writes() -> None:
+    """The ids this library writes on its own must have a measured width.
+
+    A guessed width is a silent write error on the device, and 53 is the one
+    that would hurt most: without it every parameter write is RAM-only.
+    """
+    from pyvisionect.devices.tclv import VALUE_WIDTHS
+
+    for param_id in (29, 53):
+        assert param_id in VALUE_WIDTHS
+
+
+def test_width_of_falls_back_to_a_uint32() -> None:
+    from pyvisionect.devices.tclv import DEFAULT_VALUE_WIDTH, width_of
+
+    assert DEFAULT_VALUE_WIDTH == 4
+    assert width_of(29) == 4
+    assert width_of(19) == 2
+    assert width_of(9) == 1
+    assert width_of(53) == 1
+    assert width_of(2302) == DEFAULT_VALUE_WIDTH
+
+
+def test_the_two_device_error_codes_are_distinguishable() -> None:
+    """Both were measured on a live sign; see the constants' docstrings."""
+    from pyvisionect.devices.enums import ParamControl
+    from pyvisionect.packets.param import (
+        PARAM_ERROR_BAD_VALUE,
+        PARAM_ERROR_NO_SUCH_PARAMETER,
+        ParamItem,
+    )
+
+    unknown = ParamItem(145, ParamControl.READ_ERROR, bytes.fromhex("00005800"))
+    assert unknown.error_code == PARAM_ERROR_NO_SUCH_PARAMETER
+    assert "no such parameter" in (unknown.error_name or "")
+
+    bad_value = ParamItem(29, ParamControl.WRITE_ERROR, bytes.fromhex("00005a00"))
+    assert bad_value.error_code == PARAM_ERROR_BAD_VALUE
+    assert bad_value.error_code != PARAM_ERROR_NO_SUCH_PARAMETER
+
+    fine = ParamItem(29, ParamControl.READ, bytes.fromhex("01000000"))
+    assert fine.error_code is None and fine.error_name is None
+
+    weird = ParamItem(29, ParamControl.READ_ERROR, bytes.fromhex("01020304"))
+    assert "unknown reason" in (weird.error_name or "")

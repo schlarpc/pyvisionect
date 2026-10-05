@@ -43,6 +43,9 @@ __all__ = [
     "lookup",
     "name_of",
     "check_writable",
+    "DEFAULT_VALUE_WIDTH",
+    "VALUE_WIDTHS",
+    "width_of",
 ]
 
 BANK_MCU = range(0, 179)
@@ -392,3 +395,66 @@ def check_writable(param_id: int) -> None:
         raise ReadOnlyParameter(
             param_id, name_of(param_id), USB_HINTS.get(param_id, "see the USB CLI reference")
         )
+
+DEFAULT_VALUE_WIDTH = 4
+"""Bytes to use for an integer write to a parameter of unmeasured width.
+
+Four, because the parameter channel's docstring records the vendor convention
+as "a uint32 for numeric keys", and because the device **rejects a write whose
+value is the wrong width** -- with its own error code, distinct from the one it
+gives for an id it does not implement (see :data:`VALUE_WIDTHS`).
+"""
+
+VALUE_WIDTHS: dict[int, int] = {
+    # Measured on a live 31.2" Place&Play (firmware 7.4.4407) by reading each
+    # id back and recording the Length the device itself put on the wire.
+    # These are **not** from the vendor table, which carries no width column.
+    0: 4,    # TCLV magic (efbeadde)
+    1: 4,    # TCLV table version
+    2: 4,    # Connectivity type
+    3: 4,    # Wifi ACK/NACK timeout
+    4: 4,    # Wifi power saving timeout
+    5: 4,    # WiFi DTIM skip interval
+    9: 1,    # Ethernet TCP retry count
+    10: 2,   # Ethernet TCP retry timeout
+    17: 4,   # IPv4 mode
+    19: 2,   # Server port  (692b = 11113)
+    22: 2,   # VCOM of display 2
+    27: 2,   # VCOM of display 7
+    28: 4,   # Display type
+    29: 4,   # Heart beat interval
+    52: 4,   # Sleep mode disable
+    53: 1,   # flash_save -- command-shaped, and one byte is what the device
+             # has been accepting from this library all along.
+    68: 4,   # WiFi band
+    130: 4,  # Outbound encryption
+    144: 4,  # WiFi region
+    152: 4,  # Display width
+    153: 4,  # Display height
+    154: 4,  # Mobile preferred mode
+    155: 4,  # BLE mode
+    156: 2,  # EPD temperature
+}
+"""id -> value width in bytes, as measured from the device's own read replies.
+
+Widths are **per parameter** and cannot be inferred from the value: the
+heartbeat is a uint32 that is normally 1, the server port is a uint16 that is
+normally 11113, and the Ethernet retry count is a single byte. Guessing the
+narrowest type that fits -- which this library used to do -- produces a
+one-byte write to the heartbeat, and the device answers that with a write
+error. Nothing in the vendor's parameter table records a width, so this had to
+be measured.
+
+Ids absent here fall back to :data:`DEFAULT_VALUE_WIDTH`. Some of those are
+certainly wrong -- the VCOM block at 20..27 is two bytes and only two of its
+entries were measured -- so an unexpected write error on an id not listed here
+is the first thing to suspect.
+"""
+
+
+def width_of(param_id: int) -> int:
+    """Value width in bytes for an integer write to *param_id*.
+
+    :data:`DEFAULT_VALUE_WIDTH` for an id whose width has not been measured.
+    """
+    return VALUE_WIDTHS.get(param_id, DEFAULT_VALUE_WIDTH)
