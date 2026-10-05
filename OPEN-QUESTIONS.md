@@ -736,6 +736,51 @@ found. `_pending_attrs` now carries `sync_status` alongside the raw `in_sync`,
 and both read the same verdict. The live trace above shows them in step
 throughout, including `pend.sync=converging` while `out_of_sync=off`.
 
+### A12. Waveform selection and ghost management are barely explored — OPEN
+
+We have driven this panel hundreds of times and seen **exactly one waveform**.
+Everything observed, across every capture:
+
+```
+UPD_FULL        50x
+UPD_FULL_AREA   14x
+wfn: 2          26x     <- the only waveform number ever seen
+inv: 1 / inv: 0 14x each
+ImgOpt          0x00003024 (inverse) / 0x00000124 (non-inverse)
+```
+
+E-ink controllers normally expose several waveforms -- a slow clearing refresh
+plus faster non-flashing modes for text -- and the device reports `WF=31.2_C296`
+as its waveform file, so a table exists. We do not know what selects `wfn`,
+whether the server can influence it at all, or what the other values are.
+
+**What is actually verified:** clearing is driven by `RectangleHeader.Options`
+bit `0x0002`; with the shipped `RectangleFlags = 0` the device performs an
+inverse clearing refresh on **every** full-screen push (B1, measured). That is
+the only ghost-clearing lever we have evidence for, and it is why the partial
+tracker forces a periodic full push.
+
+**What is assumed and unverified:** that newer firmware self-manages ghosting.
+The server's 120 s idle re-render ticker is armed *only for old firmware*, which
+implies the vendor believed so -- but that is the vendor's assumption, not a
+measurement. A10 saw 12 consecutive partials with no self-initiated refresh and
+no visible ghosting: suggestive, small sample.
+
+**Unexplored levers.** `ImgOpt`'s other bits (`0x3000` vs `0x0100` differ beyond
+the inverse bit). And two serial commands never run, both on the do-not-run list
+and both display-driver control: **`dcmh <mode>`** ("Runs EPD pre/post-update
+hook") and **`dcmc <color>`** ("Clears the display to a specified color"). The
+`dcm*` family also includes power-down/sleep/wake for the driver. These are the
+most direct route to the panel's own refresh machinery and the most likely to
+leave the display in a bad state, so they want a deliberate session with the
+owner present, not an autonomous probe.
+
+**Worth doing when someone is watching:** a long partial run (hundreds, not 12)
+with the serial console logging `UPD_*`/`wfn:`/`inv:` per push, to find out
+whether the firmware ever clears on its own and how much ghosting actually
+accumulates. That would turn the forced-full threshold from a precaution into a
+measured number.
+
 ### A8. The panel-boundary dark band — OPEN, partially characterised
 
 A visible artefact at the ScreenID 0 / ScreenID 1 boundary on the 31.2" panel.
