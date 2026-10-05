@@ -88,6 +88,91 @@ notices and does nothing, then forces a reset ~25 min later. They read a
 "Play built-in song." Unknown what it does. Probably explains the reported
 beeping when no server is reachable.
 
+### A8. The panel-boundary dark band — OPEN, partially characterised
+
+A visible artefact at the ScreenID 0 / ScreenID 1 boundary on the 31.2" panel.
+Present under the **vendor stack too**, so it is the device, not this library.
+Only really obvious with blue-noise dithering, because blue noise is isotropic
+and spatially stable: in a smooth gradient its texture is the only structure, so
+a small systematic offset reads as a clean edge. Floyd-Steinberg's worm
+artefacts and `none`'s hard banding both mask it.
+
+**What it is.** A *localised dark band*, **not** a step between halves. Measured
+from an uncorrected mid-grey column (base level 8.5, blue noise), deviation from
+a fitted baseline, in 8-bit photo levels:
+
+```
+ y=1256   -1.50
+ y=1264   -4.94
+ y=1277   -6.33     <- trough
+ y=1290   -6.34
+ y=1298   -3.40
+ y=1307   -2.66
+```
+
+Roughly **45 source px wide (~12 mm)**, about **one full grey step** deep,
+near y=1280.
+
+**Dead ends, recorded so they are not repeated.**
+1. *Per-half offset.* The first model was "ScreenID 1 renders darker", from
+   measuring a step with +-80 px windows and a +-10 px guard around the
+   boundary. That window structure averages a narrow band into *both* sides and
+   reports a small asymmetry instead of the band. A sweep of constant offsets
+   (0.0 .. 1.4 steps added to the bottom half) made things **worse**: the band
+   survived and the correction added a visible brightness step of its own.
+   A half-plane correction cannot cancel a localised band.
+2. *Symmetric raised-cosine on the boundary.* Halfwidths 24/40/64, amplitudes
+   0.6/1.0/1.4. Best was the **widest** (64/1.0), suggesting both too narrow and
+   too weak -- but none was clean.
+3. *VCOM mismatch.* Ruled out: `display_conf_get` reports Vcom 0..3 all
+   identical at 2400 mV (4..7 unused).
+
+**Current hypothesis.** The bump needs to be wider, stronger, **and not centred
+on y=1280** -- the owner's read is that the centre belongs further *up* (smaller
+y, canvas coordinates, where the rendered text is upright). That would mean the
+band is offset from the screen boundary, which argues against a simple
+two-driver-join explanation and explains why every symmetric bump looked wrong
+regardless of width.
+
+**Next experiment** (`tmp/visionect/push/sweep4.py`, written but never
+evaluated): fix halfwidth 128 / amplitude 1.4 and sweep the **centre offset**
+over -160, -120, -80, -40, 0, +40, +80 px against an uncorrected reference.
+Pin the centre first, then refine width and amplitude, then consider an
+**asymmetric** profile -- the first measurement recovered faster on the high-y
+side (-3.40 at y=1299 vs -4.94 at y=1264), so the true shape may be skewed.
+
+**Method notes.**
+- Closed-loop beats photometry here. Reflective e-ink photographs badly: glare,
+  lighting gradients and perspective repeatedly broke automated measurement (one
+  photo's glare merged all 8 bars into 2). Put candidate corrections on the
+  glass side by side and let a human pick.
+- Make every candidate **straddle** the boundary, as columns. A flat field puts
+  the two sides far apart with no reference and the artefact becomes nearly
+  invisible.
+- Use **half-step** base levels (e.g. 8.5). At an exact ramp level the dither is
+  a no-op and the test degenerates to a flat field.
+- Any correction must go in **before** dithering, so it is absorbed into the
+  noise rather than drawing an edge of its own.
+
+**If it is correctable**, it ships as optional per-panel calibration data in
+`imaging/` -- values specific to one unit's silicon, not to the model. The
+vendor stack has no compensation mechanism of any kind, so this would make the
+reimplementation render *better* than the software it replaces. It may also
+prove uncorrectable: if those pixels cannot reach the same states as the rest of
+the panel, pre-compensation gets closer but never clean.
+
+### A9. Push and refresh latency — measured, mostly explained
+From the first live push: encode **0.05 s**; image transferred and **acked after
+~7 s** (~1.8 MB to a TI CC3100 at 1-3 Mbps -- LZ4 buys almost nothing on
+dithered data); `DisplayStateCRC` confirmation only arrives on the next
+heartbeat, **~53 s later**. So the "about a minute" is mostly *confirmation*
+latency, not draw time. **`cs 3`** ("Connect to server", documented) forces an
+immediate reconnect and removes the wake-cycle wait.
+Still unmeasured: the panel draw itself, bounded between the ack and the next
+heartbeat. The serial console narrates display activity, so capturing it across
+a push would pin it -- worth doing, since "appears ~10 s after the service call"
+is a very different UX promise from "up to a minute".
+
 ---
 
 ## B. Protocol gaps — understood but unverified
