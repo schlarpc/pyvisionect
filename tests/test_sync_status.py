@@ -19,6 +19,8 @@ from pyvisionect.session.device import (
     DeviceState,
 )
 
+MINUTE = 60.0
+
 DEVICE_ID = bytes.fromhex("21002b00055137303234393600000000")
 
 TAG_DISPLAY_STATE_CRC = 9
@@ -80,7 +82,36 @@ def test_two_contacts_still_disagreeing_is_a_real_problem() -> None:
     dev.note_push(2222, now=0.0)
     for _ in range(CONVERGENCE_CONTACTS):
         dev.apply_status(status(crc=1111))
-    assert dev.sync_status(now=5.0) is SyncStatus.DIVERGED
+    assert dev.sync_status(now=dev.settle_time()) is SyncStatus.DIVERGED
+
+
+def test_the_burst_of_contacts_around_a_draw_does_not_count() -> None:
+    """The live failure mode this gate exists for.
+
+    The 31.2" sign emits nine status packets in the 55 s after a push and then
+    one a minute. Taking the bare counter at face value would call a frame
+    diverged fifteen seconds in, while it is still on the wire.
+    """
+    dev = state()
+    dev.apply_status(status(crc=1111, next_status=1))
+    dev.note_push(2222, now=0.0)
+    for _ in range(9):
+        dev.apply_status(status(crc=1111))
+    assert dev.contacts_since_push == 9
+    assert dev.settle_time() == pytest.approx(MINUTE + DRAW_ALLOWANCE)
+    assert dev.sync_status(now=15.0) is SyncStatus.CONVERGING
+    assert dev.sync_status(now=55.0) is SyncStatus.CONVERGING
+    assert dev.sync_status(now=dev.settle_time()) is SyncStatus.DIVERGED
+
+
+def test_the_settle_time_clears_the_longest_convergence_we_measured() -> None:
+    """48 s was the slowest push-to-echo seen on this sign; 120 s is the gate."""
+    dev = state()
+    dev.apply_status(status(crc=1111, next_status=1))
+    dev.note_push(2222, now=0.0)
+    for _ in range(5):
+        dev.apply_status(status(crc=1111))
+    assert dev.sync_status(now=48.0) is SyncStatus.CONVERGING
 
 
 def test_the_device_reporting_our_checksum_clears_it() -> None:
@@ -89,7 +120,7 @@ def test_the_device_reporting_our_checksum_clears_it() -> None:
     dev.note_push(2222, now=0.0)
     dev.apply_status(status(crc=1111))
     dev.apply_status(status(crc=2222))
-    assert dev.sync_status(now=120.0) is SyncStatus.IN_SYNC
+    assert dev.sync_status(now=1e9) is SyncStatus.IN_SYNC
 
 
 def test_a_silent_device_trips_the_deadline() -> None:
@@ -98,7 +129,8 @@ def test_a_silent_device_trips_the_deadline() -> None:
     dev.apply_status(status(crc=1111, next_status=1))
     dev.note_push(2222, now=0.0)
     grace = dev.convergence_grace()
-    assert grace == pytest.approx(CONVERGENCE_CONTACTS * 60.0 + DRAW_ALLOWANCE)
+    assert grace == pytest.approx(CONVERGENCE_CONTACTS * MINUTE + DRAW_ALLOWANCE)
+    assert dev.contacts_since_push == 0, "it never called back"
     assert dev.sync_status(now=grace - 1) is SyncStatus.CONVERGING
     assert dev.sync_status(now=grace) is SyncStatus.DIVERGED
 
@@ -117,6 +149,21 @@ def test_the_deadline_follows_the_device_announced_schedule() -> None:
     assert dev.sync_status(now=2 * 3600.0 + DRAW_ALLOWANCE) is SyncStatus.DIVERGED
 
 
+def test_a_chatty_device_on_a_long_heartbeat_is_judged_sooner() -> None:
+    """The point of keeping the counter at all.
+
+    Waiting two hours to notice a sign is showing the wrong thing, when it has
+    told us twice in the meantime, would be absurd.
+    """
+    dev = state()
+    dev.apply_status(status(crc=1111, next_status=60))
+    dev.note_push(2222, now=0.0)
+    dev.apply_status(status(crc=1111))
+    dev.apply_status(status(crc=1111))
+    assert dev.sync_status(now=dev.settle_time()) is SyncStatus.DIVERGED
+    assert dev.settle_time() < dev.convergence_grace()
+
+
 def test_without_a_clock_only_the_contact_counter_applies() -> None:
     """A restored state has no usable push timestamp and must not guess."""
     dev = state()
@@ -127,6 +174,7 @@ def test_without_a_clock_only_the_contact_counter_applies() -> None:
     dev.apply_status(status(crc=1111))
     dev.apply_status(status(crc=1111))
     assert dev.sync_status() is SyncStatus.DIVERGED
+    assert dev.sync_status(now=1e9) is SyncStatus.DIVERGED
 
 
 def test_a_device_that_reports_no_crc_at_all_is_unknown() -> None:
@@ -142,7 +190,7 @@ def test_a_second_push_resets_the_window() -> None:
     dev.note_push(2222, now=0.0)
     dev.apply_status(status(crc=1111))
     dev.apply_status(status(crc=1111))
-    assert dev.sync_status(now=1.0) is SyncStatus.DIVERGED
+    assert dev.sync_status(now=500.0) is SyncStatus.DIVERGED
     dev.note_push(3333, now=500.0)
     assert dev.contacts_since_push == 0
     assert dev.sync_status(now=500.0) is SyncStatus.CONVERGING

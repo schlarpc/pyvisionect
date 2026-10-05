@@ -79,18 +79,25 @@ CONVERGENCE_CONTACTS = 2
 
 **Two, not one.**  One is tempting and wrong: a push that lands a second before
 a scheduled heartbeat is acked but not yet *drawn*, so the very next status
-still carries the old ``DisplayStateCRC``.  The second contact is the first one
-that is unambiguously after the draw.  Measured on the 31.2" sign: ack at
-6.5 s, new checksum echoed at 48 s, heartbeat interval 60 s -- so contact #1
-carried it that time, and would not have if the push had been 15 s later.
+still carries the old ``DisplayStateCRC``.
+
+The counter alone is not enough either, which is only visible on hardware: the
+sign **bursts** status packets around a draw.  Measured on the 31.2" sign on
+2026-10-05, with a one-minute announced heartbeat, the contacts arriving after
+a push went 0 -> 9 in the first 55 s and then settled to roughly one a minute.
+So "two contacts" can elapse in fifteen seconds, well before a 1.84 MB frame
+has even finished transferring.  That is why the counter is gated on
+:data:`DRAW_ALLOWANCE` as well -- see :meth:`DeviceState.sync_status`.
 """
 
 DRAW_ALLOWANCE = 60.0
-"""Seconds added to the time-based backstop for transfer plus panel draw.
+"""Seconds for a frame to transfer and reach the glass, on top of one interval.
 
-A full-screen push is ~1.84 MB to a CC3100 (acked at 3-7 s) and the panel
-itself needs ~3 s of waveform.  60 s is an order of magnitude of headroom, and
-the contact counter is the criterion that normally fires first.
+A full-screen push is ~1.84 MB to a CC3100 (acked at 3-7 s) and the panel needs
+~3 s of waveform.  The measured gap from push to the device echoing the new
+``DisplayStateCRC`` is 10-48 s depending on where the push lands relative to the
+heartbeat, so this is roughly 2x the worst observed case before it is even
+added to an interval.
 """
 
 DEFAULT_CONTACT_INTERVAL = 60.0
@@ -278,6 +285,26 @@ class DeviceState:
             return None
         return float(minutes) * 60.0
 
+    def _interval(self, interval: float | None = None) -> float:
+        if interval is None:
+            interval = self.expected_contact_interval
+        if not interval or interval <= 0:
+            interval = DEFAULT_CONTACT_INTERVAL
+        return interval
+
+    def settle_time(self, *, interval: float | None = None) -> float:
+        """Seconds before the device could *possibly* have reported the push.
+
+        One full announced interval -- the worst case is a frame that finishes
+        drawing a moment after a status went out, so the news waits for the
+        next one -- plus :data:`DRAW_ALLOWANCE` for getting it onto the glass.
+
+        Nothing before this is evidence of anything, however many status
+        packets have arrived, because the sign emits a burst of them around a
+        draw.
+        """
+        return self._interval(interval) + DRAW_ALLOWANCE
+
     def convergence_grace(
         self,
         *,
@@ -293,11 +320,7 @@ class DeviceState:
         difference between "wait for the sign" and "wait long enough that the
         alarm is useless".
         """
-        if interval is None:
-            interval = self.expected_contact_interval
-        if not interval or interval <= 0:
-            interval = DEFAULT_CONTACT_INTERVAL
-        return contacts * interval + DRAW_ALLOWANCE
+        return contacts * self._interval(interval) + DRAW_ALLOWANCE
 
     def convergence_deadline(
         self,
@@ -321,23 +344,32 @@ class DeviceState:
     ) -> "SyncStatus":
         """:attr:`in_sync`, but with "it has not answered yet" split out.
 
-        The rule has two halves and they fail in opposite directions, so it is
-        an **or**:
+        A mismatch becomes :attr:`SyncStatus.DIVERGED` when **either**:
 
         * the device has been in touch :data:`CONVERGENCE_CONTACTS` times since
-          the push and still disagrees -- it has had its say;
-        * more than :meth:`convergence_grace` seconds have passed -- it has
-          stopped saying anything, and a silent sign is not an excuse for a
-          stale panel.
+          the push, **and** :meth:`settle_time` has passed so those contacts
+          could actually have carried the news -- it has had its say; or
+        * :meth:`convergence_grace` has passed -- it has stopped saying
+          anything, and a silent sign is not an excuse for a stale panel.
 
-        The counter is the one that normally fires, and it needs no clock.  The
-        deadline is the backstop for a device that simply stopped calling, and
-        it is skipped when *now* is not given or the push predates a restart.
+        The second condition is the one that catches a device that went away.
+        The first is faster whenever the device is chatty, which matters for a
+        sign on a long heartbeat.
+
+        **The ``settle_time`` gate on the counter is not belt-and-braces.** The
+        31.2" sign emits a burst of status packets around a draw -- nine in the
+        first 55 s after a push, then one a minute -- so the bare counter can
+        be satisfied in fifteen seconds, before a 1.84 MB frame has finished
+        transferring. Counting those as "chances to report" would reintroduce
+        the false alarm this method exists to remove.
 
         Args:
             now: a clock value on the same scale as the one passed to
-                :meth:`DeviceConnection.send_image`.  Omit it to use the
-                contact counter alone.
+                :meth:`DeviceConnection.send_image`.  Without it neither
+                deadline can be evaluated and the counter alone decides, which
+                is the right fallback for a state restored from disk: any push
+                it remembers is from before the restart and has long since had
+                its chance.
             contacts: how many contacts count as "had its say".
             interval: override the device's announced contact interval, in
                 seconds.
@@ -347,10 +379,15 @@ class DeviceState:
             return SyncStatus.UNKNOWN
         if state:
             return SyncStatus.IN_SYNC
-        if self.contacts_since_push >= contacts:
+
+        enough_contacts = self.contacts_since_push >= contacts
+        if now is None or self.last_push_at is None:
+            return SyncStatus.DIVERGED if enough_contacts else SyncStatus.CONVERGING
+
+        elapsed = now - self.last_push_at
+        if enough_contacts and elapsed >= self.settle_time(interval=interval):
             return SyncStatus.DIVERGED
-        deadline = self.convergence_deadline(contacts=contacts, interval=interval)
-        if now is not None and deadline is not None and now >= deadline:
+        if elapsed >= self.convergence_grace(contacts=contacts, interval=interval):
             return SyncStatus.DIVERGED
         return SyncStatus.CONVERGING
 
