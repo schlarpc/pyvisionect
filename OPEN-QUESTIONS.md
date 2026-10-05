@@ -463,15 +463,32 @@ framing, direction-dependent CRC, block chain, LZ4, the 4 bpp low-nibble pack,
 the 4-band fold into 2 screens with the screen-1 lane swap, the `eink-flip`
 mirror, and XXHash32 over the 8-bit state image.
 
-### A6. `sf_rdid` / `sf_rdst` crash the CLI task — PARTIAL
+### A6. `sf_rdid` / `sf_rdst` crash the CLI task — CLOSED, not worth testing
 Both assert (`spi_flash_cli.c:139`/`:188`) and kill `usb_cli_task`; the watchdog
 notices and does nothing, then forces a reset ~25 min later. They read a
-*selected* device without checking `sf_select` ran. Untested hypothesis:
-`sf_select` first makes them safe. Both are gated behind an explicit flag.
+*selected* device without checking `sf_select` ran, so plausibly `sf_select`
+first makes them safe.
 
-### A7. `play_music` — OPEN, trivial
-"Play built-in song." Unknown what it does. Probably explains the reported
-beeping when no server is reachable.
+**Deliberately not tested, and the hypothesis is left unproven.** The cost of
+being wrong is a crashed console and a device reboot ~25 minutes later; the
+prize is the JEDEC id and status register of the SPI flash holding the
+filesystem. We have no use for either -- that flash carries the factory demo
+images (see D2/B7), not firmware, and `fs_stats` already reports the capacity
+figures that matter. Testing a known-crashing pair of commands to learn a chip
+id nobody needs is a bad trade on a sign that lives in a kitchen.
+
+Both stay gated behind `i_really_mean_it`, with the assert sites named in the
+docstring so the next person can make their own call. If someone does try it,
+`sf_list` first is safe and tells you what there is to select.
+
+### A7. `play_music` — OPEN, blocked on a waking human
+"Play built-in song." Unknown what it does. Probably explains the beeping
+reported when no server is reachable -- which is now better explained anyway by
+`E: Max conn errs. Reboot` (see E2), since a sign that power-cycles is also a
+sign that re-runs whatever it plays at boot.
+
+Trivial to settle, but it makes an audible noise in someone's home, so it waits
+until the owner is awake and wants to hear it. Not a technical blocker.
 
 ### A10. Do rectangle (partial) updates actually work on this panel? — **ANSWERED: yes** (2026-10-05)
 
