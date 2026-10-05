@@ -7,6 +7,7 @@ import pytest
 from pyvisionect.devices import panel_for
 from pyvisionect.devices.enums import PacketType
 from pyvisionect.packets import (
+    DEVICE_IMAGE_FILES,
     FILE_LIST_LENGTH,
     FILE_LIST_PATH,
     FileOpen,
@@ -238,16 +239,46 @@ def test_read_file_range_is_a_short_read() -> None:
 
 
 def test_parse_file_listing() -> None:
-    blob = b"image0.pv2 1843915 0\nimage1.pv2 1843915 0\n@syslog 4096 0\n"
+    """The real blob from firmware 7.4.4407, byte for byte.
+
+    Captured 2026-10-05 from the 31.2" sign in reply to ``Read(".", 10240)``.
+    The columns are **name, checksum, size** -- note the useless ``0`` is in
+    the middle. An earlier reading of this had them the other way round and so
+    reported every file as zero bytes long.
+    """
+    blob = (
+        b"/image0.pv2 0 134409\n/image1.pv2 0 199047\n/image2.pv2 0 1213841\n"
+        b"/image3.pv2 0 781996\n/image4.pv2 0 453496\n/image5.pv2 0 1007217\n\x00"
+    )
     listing = parse_file_listing(blob)
-    assert set(listing) == {"image0.pv2", "image1.pv2", "@syslog"}
-    assert listing["image0.pv2"].size == 1843915
-    assert listing["image0.pv2"].checksum == "0"
+    assert set(listing) == set(DEVICE_IMAGE_FILES)
+    assert listing["/image0.pv2"].size == 134409
+    assert listing["/image0.pv2"].checksum == "0"
+    assert listing["/image2.pv2"].size == 1213841
+
+
+def test_listing_size_agrees_with_the_file_own_protocol_header() -> None:
+    """Why we know which column is which.
+
+    ``/image0.pv2`` lists as 134409 bytes and its own ``ProtocolHeader.Length``
+    reads 134389, which is 134409 minus the 20-byte header. Read the columns
+    the other way round and the sizes are all 0, which no file is.
+    """
+    listing = parse_file_listing(b"/image0.pv2 0 134409\n")
+    assert listing["/image0.pv2"].size == 134389 + 20
 
 
 def test_parse_file_listing_is_forgiving_of_device_formatting() -> None:
-    listing = parse_file_listing("good 10 0\n\nbroken\nalso bad\n")
+    listing = parse_file_listing("good 0 10\n\nbroken\nalso bad\n")
     assert set(listing) == {"good"}
+    assert listing["good"].size == 10
+
+
+def test_parse_file_listing_reads_a_two_column_row_as_a_size() -> None:
+    """Not something this firmware emits, but dropping the row is worse."""
+    listing = parse_file_listing("name 4096\n")
+    assert listing["name"].size == 4096
+    assert listing["name"].checksum == ""
 
 
 def test_file_module_docstring_no_longer_claims_screen_n_drives_updates() -> None:
