@@ -383,3 +383,76 @@ def test_a_command_the_library_has_never_heard_of_defaults_to_the_write_tier() -
     s = sign()
     with pytest.raises(WriteNotAllowed):
         s._run("some_future_command", check=False)
+
+
+# ------------------------------------------------------------------- vlog_*
+
+
+def test_the_vlog_family_is_a_matrix_not_a_single_level() -> None:
+    """Levels are set per source and per destination independently.
+
+    Which is why ``log_config_get``'s single ``{"Mobile": 0}`` is at most one
+    cell of it, and why there is no "the" log level to read back.
+    """
+    assert COMMANDS["vlog_set_source_level"].args == "<source> <level>"
+    assert COMMANDS["vlog_set_destination_level"].args == "<destination> <level>"
+    assert COMMANDS["vlog_unify_levels"].args == "<usb_level>"
+    assert COMMANDS["vlog_set_default_levels"].args == ""
+
+
+def test_the_unify_help_line_contradicts_its_own_signature() -> None:
+    """It takes ``<usb_level>`` and says it "resets to default". Both cannot hold.
+
+    Pinned as a test because it is the reason
+    :meth:`Sign.unify_usb_log_levels` has no default argument: the command's
+    documentation is self-inconsistent, so guessing 0 on someone's hardware is
+    not justified.
+    """
+    entry = COMMANDS["vlog_unify_levels"]
+    assert entry.description == "Reset logger levels to default for USB"
+    assert entry.arity == 1
+
+
+def test_the_whole_vlog_family_is_undocumented_by_the_vendor() -> None:
+    for name in (
+        "vlog_set_default_levels",
+        "vlog_set_destination_level",
+        "vlog_set_source_level",
+        "vlog_unify_levels",
+    ):
+        assert name in UNDOCUMENTED_IN_7_4_4407
+
+
+def test_unify_usb_log_levels_requires_an_explicit_level() -> None:
+    """No default, because the direction of the scale is unknown."""
+    import inspect
+
+    signature = inspect.signature(Sign.unify_usb_log_levels)
+    assert signature.parameters["level"].default is inspect.Parameter.empty
+
+
+def test_the_vlog_setters_are_gated_as_writes() -> None:
+    s = sign()
+    for call in (
+        lambda: s.unify_usb_log_levels(0),
+        lambda: s.set_log_source_level(1, 0),
+        lambda: s.set_log_destination_level(1, 0),
+        lambda: s.default_logs(),
+    ):
+        with pytest.raises(WriteNotAllowed, match="allow_writes=True"):
+            call()
+    assert s.console._require().written == []  # type: ignore[attr-defined]
+
+
+def test_unify_sends_the_level_it_was_given() -> None:
+    s = Sign(
+        SerialConsole(
+            transport=FakeTransport(replies={"vlog_unify_levels": "rv: 0"}),
+            command_timeout=1.0,
+            idle_timeout=0.02,
+            read_timeout=0.0,
+        ),
+        allow_writes=True,
+    )
+    s.unify_usb_log_levels(7)
+    assert s.console._require().written == ["vlog_unify_levels 7\r"]  # type: ignore[attr-defined]

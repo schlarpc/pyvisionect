@@ -1033,10 +1033,13 @@ class LogConfig:
             ``<module> <value>`` pair and the ``vlog_*`` family implies a richer
             scheme. The getter simply does not print the rest.
 
-    The four ``vlog_*`` commands are the ones that matter for this library:
-    ``vlog_unify_levels 0`` silences the USB log destination, which is the clean
-    fix for the interleaving problem :mod:`pyvisionect.io.usb.console` works
-    around.
+    The four ``vlog_*`` commands are the interesting ones here, because they
+    expose a richer model than this getter does: levels are set per *source* and
+    per *destination* independently, so logging is a matrix and ``log_config_get``
+    shows one cell of it at most. ``vlog_unify_levels`` would collapse the USB
+    column to a single level -- see
+    :meth:`pyvisionect.io.usb.device.Sign.unify_usb_log_levels` for why that is
+    not yet a usable answer to the interleaving problem.
     """
 
     modules: Mapping[str, int]

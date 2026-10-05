@@ -431,9 +431,16 @@ one is a heuristic:
 `CommandResult` carries `lines` (yours), `logs` (the firmware's) and `raw` (both,
 lossless). There is also an `on_log` callback and a `logs` history.
 
-The clean fix is to turn the log sink off, which the firmware supports:
-`Sign.quiet_logs()` sends `vlog_unify_levels 0`. That is a write, so it is gated,
-and the level scale was not confirmed on hardware.
+There may be a way to turn the sink off at source. The firmware has a `vlog_*`
+family that sets log levels per *source* and per *destination* independently —
+logging is a matrix — and `vlog_unify_levels <usb_level>` applies one level to
+every source on the USB destination. But **which end of that scale is quiet is
+not known**, so the wrong argument floods the port instead of silencing it, and
+the command's own help line ("Reset logger levels to default for USB")
+contradicts its taking an argument at all. `Sign.unify_usb_log_levels(level)`
+exposes it with a mandatory argument and no default, and documents both
+readings. Until someone runs it, the four mechanisms above are what this module
+relies on.
 
 #### Line discipline, measured
 

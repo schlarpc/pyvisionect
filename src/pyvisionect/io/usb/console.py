@@ -73,11 +73,15 @@ descending order of how much they are relied on:
    heuristic in the chain, and it is the only one that can be wrong, so it is
    a plain editable tuple of regexes rather than something clever.
 
-**The honest fix is to turn the log sink off**, which the firmware supports:
-``vlog_unify_levels 0`` silences the USB destination, and
-``vlog_set_default_levels`` puts it back.  See
-:meth:`SerialConsole.quiet_logs`.  Those are writes, so they are gated like any
-other setter.
+**There may be a way to turn the log sink off at source**, which would make all
+of the above unnecessary: the firmware has a ``vlog_*`` family that sets per-
+source and per-destination log levels, and ``vlog_unify_levels <usb_level>``
+applies one level to every source on the USB destination.  But **which end of
+that scale is quiet is not known** -- the wrong argument would flood the port
+rather than silence it -- so it is an experiment, not a fix.  See
+:meth:`pyvisionect.io.usb.device.Sign.unify_usb_log_levels`, which spells out
+exactly what is and is not known and deliberately has no default argument.
+Until someone runs it, the four mechanisms above are what this module relies on.
 
 One assumption remains: that the firmware emits whole log lines atomically, so
 an interloper never splits a reply line down the middle.  It held across every

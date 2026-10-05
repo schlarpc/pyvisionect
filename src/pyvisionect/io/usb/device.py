@@ -639,22 +639,81 @@ class Sign:
         """
         return self._run("reboot", expect_prompt=False)
 
-    def quiet_logs(self) -> CommandResult:
-        """``vlog_unify_levels 0`` -- silence the asynchronous log stream.
+    def unify_usb_log_levels(self, level: int) -> CommandResult:
+        """``vlog_unify_levels <usb_level>`` -- set one level for every log source
+        on the USB destination.
 
-        The clean fix for the interleaving problem that
-        :mod:`pyvisionect.io.usb.console` otherwise works around with echo
-        anchors and pattern matching.  Undo with :meth:`default_logs`.
+        **The direction of the level scale is unknown, so this may make the
+        asynchronous log stream louder rather than quieter.**  Read the whole of
+        this docstring before calling it.
 
-        **Untested against hardware.**  The argument is documented only as
-        ``<usb_level>`` and 0 is the obvious "off", but the firmware's level
-        scale was not confirmed, so this may need a different number.  It is a
-        write, so it is gated.
+        What the device says about it, in full -- this is the entire
+        documentation that exists anywhere, because the command is absent from
+        the vendor's published reference::
+
+            vlog_unify_levels <usb_level>: Reset logger levels to default for USB
+
+        What that supports.  The ``vlog_*`` family models logging as a matrix:
+        ``vlog_set_source_level <source> <level>`` sets a producer's level and
+        ``vlog_set_destination_level <destination> <level>`` sets a sink's, so
+        every (source, sink) pair has an effective level.  "Unify", plus a single
+        level argument, plus "for USB", reads as *collapse one column of that
+        matrix to a single value* -- every source set to ``level`` on the USB
+        sink.
+
+        What it does **not** support, and why this method takes a mandatory
+        argument instead of defaulting to 0:
+
+        * **Which end of the scale is quiet is not known.**  ``0`` may mean "emit
+          nothing" or it may mean "emit everything".  If it is the latter, this
+          call floods the port.  Nothing observed on hardware distinguishes the
+          two: the only level value ever seen is ``log_config_get`` reporting
+          ``Mobile: 0``, and the Mobile subsystem is not in use on a WiFi sign,
+          so that 0 is equally consistent with "off" and with "default".
+        * **The help line contradicts its own signature.**  "Reset ... to
+          default" describes a command that ignores its argument; ``<usb_level>``
+          describes one that uses it. One of the two is wrong, and this
+          firmware's help text is demonstrably unreliable elsewhere --
+          ``conn_fw_ver`` is described as "Scan for WiFi APs" and
+          ``max17135_dump`` is listed as nullary and rejects a bare call.
+
+        So this is the lever that *should* solve the interleaving problem
+        :mod:`pyvisionect.io.usb.console` works around, and it is here so it can
+        be tried, but trying it is an experiment and not a fix.  Do it with a
+        capture running and :meth:`default_logs` ready to undo it, and note that
+        nothing here persists without ``flash_save``.
+
+        Args:
+            level: the level to apply. Deliberately has no default.
         """
-        return self._run("vlog_unify_levels 0")
+        return self._run(f"vlog_unify_levels {level}")
+
+    def set_log_source_level(self, source: int | str, level: int) -> CommandResult:
+        """``vlog_set_source_level <source> <level>`` -- one producer's level.
+
+        The *source* namespace was never enumerated: no command lists it, and
+        ``log_config_get`` reports a single module (``Mobile``) which may or may
+        not share that namespace. Unverified, like the level scale.
+        """
+        return self._run(f"vlog_set_source_level {source} {level}")
+
+    def set_log_destination_level(
+        self, destination: int | str, level: int
+    ) -> CommandResult:
+        """``vlog_set_destination_level <destination> <level>`` -- one sink's level.
+
+        Sinks plausibly include the USB UART, the filesystem (TCLV 161 flushes a
+        syslog to it) and the network link, but the namespace was never
+        enumerated and no value for *destination* has been observed.
+        """
+        return self._run(f"vlog_set_destination_level {destination} {level}")
 
     def default_logs(self) -> CommandResult:
-        """``vlog_set_default_levels`` -- put the log levels back."""
+        """``vlog_set_default_levels`` -- put the whole level matrix back.
+
+        The undo for the three ``vlog`` setters above. Nullary, and the one
+        member of the family whose help line and signature agree.
+        """
         return self._run("vlog_set_default_levels")
 
     def send_status_packet(self) -> CommandResult:
