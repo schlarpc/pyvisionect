@@ -64,11 +64,19 @@ without `flash_save`.
 > One-way door: enabling 145 against a server with no cert strands the device
 > (recoverable only over USB). Cert first, then flip.
 
-### A5. Push an image to the sign from `pyvisionect` — OPEN
-**The biggest untested path.** Receive, decode and ack are proven against the
-real device; the encoder reproduces captured payloads byte-exactly offline. But
-we have never driven the panel from our own stack. Until that lands, "replaces
-the vendor server" is only two-thirds demonstrated.
+### A5. Push an image to the sign from `pyvisionect` — **DONE**
+Driven end to end on 2026-10-04 against the live 31.2" sign, with no vendor
+software in the path. A 1440x2560 canvas encoded at 4 bpp with blue-noise
+dithering in 0.05 s into 2 rectangles of 2880x640 (921,600 bytes each), pushed
+as packet `4164952196`, acked by the device, and then — on the next heartbeat —
+reported back as `DisplayStateCRC = 2631394564`, **exactly** the
+`state_checksum` our encoder computed, with `DisplayUpdateCount` 0 -> 1.
+
+That closes the loop: the device independently agrees, pixel for pixel, with
+what we believed we sent. Every layer is now proven against real hardware --
+framing, direction-dependent CRC, block chain, LZ4, the 4 bpp low-nibble pack,
+the 4-band fold into 2 screens with the screen-1 lane swap, the `eink-flip`
+mirror, and XXHash32 over the 8-bit state image.
 
 ### A6. `sf_rdid` / `sf_rdst` crash the CLI task — PARTIAL
 Both assert (`spi_flash_cli.c:139`/`:188`) and kill `usb_cli_task`; the watchdog
