@@ -157,11 +157,13 @@ class ConnectionConfig:
     allow_command_packets: bool = True
     """Whether ``packet.Type 2`` (command) may be sent at all.
 
-    Set ``False`` for a "safe mode" that guarantees none are emitted. **Type 2
-    has never been observed on the wire** -- not in any direction, in any
-    capture -- so every command this library can send is code-read only. See the
-    warning at the top of :mod:`pyvisionect.packets.misc` for why that is worth
-    being careful about.
+    Set ``False`` for a "safe mode" that guarantees none are emitted. **Two of
+    the 24 command ids have been observed on the wire** -- ``sleep`` (4) and
+    ``status request`` (11), captured 2026-10-05 -- which settles the 12-byte
+    header for all of them but leaves the other 22 ids' payloads and effects
+    code-read only. See the note at the top of
+    :mod:`pyvisionect.packets.misc` for why that is still worth being careful
+    about.
     """
     ack_handled_packets: bool = True
     """Ack every packet we handle, as every vendor handler does."""
@@ -404,13 +406,13 @@ class DeviceConnection:
     def send_command(self, command_type: int, payload: bytes = b"") -> int:
         """Queue a ``packet.Command`` (type 2, server to device only).
 
-        .. warning:: **[UNVERIFIED -- all of packet type 2]**
-           Type 2 has never been seen on the wire in either direction. The
-           layout here is read out of the Go struct, and there is direct
-           precedent for the struct and the wire format disagreeing: the param
-           packet's struct is 12 bytes and its wire header is **8**. So the
-           12-byte ``CommandHeader`` this emits may be wrong. See
-           :mod:`pyvisionect.packets.misc`.
+        .. note:: **The framing is verified; most of the command ids are
+           not.** Two type-2 frames were captured on 2026-10-05 -- ``sleep``
+           (4) and ``status request`` (11) -- and
+           :class:`~pyvisionect.packets.CommandPacket` decoded both unmodified,
+           ``Reserved`` included, so the 12-byte ``CommandHeader`` this emits is
+           right. What remains unverified is the payload and effect of the other
+           22 ids. See :mod:`pyvisionect.packets.misc`.
 
         Raises:
             CommandPacketsDisabled: if
@@ -420,8 +422,10 @@ class DeviceConnection:
             raise CommandPacketsDisabled(
                 f"refusing to send packet type 2 (command "
                 f"{CommandType.NAMES.get(command_type, command_type)}): "
-                "ConnectionConfig(allow_command_packets=False). Type 2 has "
-                "never been observed on the wire, so this is an opt-in."
+                "ConnectionConfig(allow_command_packets=False). Only "
+                "sleep (4) and status request (11) have ever been seen on the "
+                "wire; the other 22 ids have never been observed, which is "
+                "what this switch is for."
             )
         name = CommandType.NAMES.get(command_type, f"command({command_type})")
         return self.send(
@@ -433,16 +437,25 @@ class DeviceConnection:
     def request_status(self) -> int:
         """``CommandType 11`` -- what the watchdog sends on expiry.
 
-        The one type-2 command with a traced emission site in the vendor server
-        (``(*ping).resumePing.func1.1``, ``pv3.go:1087-1088``), so of the
-        commands here it is the best attested -- though still never captured.
+        **Captured on the wire** (2026-10-05): ``0b000000 00000000 00000000``,
+        i.e. 12 bytes of header with ``PayloadLength = 0`` and no payload. The
+        device logs ``Command status get received`` and answers with an
+        unsolicited status packet carrying ``ConnectReason == 8`` ("by server
+        request"), on top of the ordinary ``Control{Flags: 1}`` ack. The vendor's
+        emitter is the inactivity watchdog (``(*ping).resumePing.func1.1``,
+        ``pv3.go:1087-1088``).
         """
         return self.send_command(CommandType.STATUS_REQUEST)
 
     def reboot(self) -> int:
-        """``CommandType 0``.
+        """``CommandType 1``.
 
-        .. warning:: Unverified, like all of type 2. Worth noting that a reboot
+        ``1`` is reboot and ``0`` is echo, in both the v1 and the v2 enum --
+        ``bin/networkmanager``'s ``main.(*Panda).Reboot`` writes ``Command = 1``
+        with a 4-byte payload. An earlier revision of this library had the two
+        swapped, so this call would have sent ``echo``.
+
+        .. warning:: Never observed on the wire. Worth noting that a reboot
            *is* observable after the fact: the device reconnects with
            ``ConnectReason == 1`` (reboot), which
            :attr:`~pyvisionect.packets.StatusPacket.connect_reason_name`
@@ -475,15 +488,23 @@ class DeviceConnection:
     def sleep(self, minutes: int) -> int:
         """``CommandType 4`` -- deep-sleep for *minutes*.
 
-        The payload framing **is** resolved: ``stdcmd.Sleep.Done``
-        (``vss/pkg/command/stdcmd/sleep.go:30-38``) builds ``CommandID = 4``
-        with a payload of ``proto.Marshall(uint32 durationMinutes)``, and
-        rejects ``duration == 0`` with ``errSleepTime``. So: one little-endian
-        uint32, in minutes, non-zero.
+        **Captured on the wire** (2026-10-05):
+        ``04000000 04000000 00000000 8e030000`` -- the 12-byte header plus one
+        little-endian uint32 of minutes, 910 in that frame. The device logged
+        ``Command sleep received`` / ``Wake after 910 minutes!`` and slept. The
+        server-side builder is ``stdcmd.Sleep.Done``
+        (``vss/pkg/command/stdcmd/sleep.go:30-38``), which rejects
+        ``duration == 0`` with ``errSleepTime``.
 
         **Order this last-but-one.** The device leaves when it gets this, so the
         image bytes have to be on the wire first. :meth:`apply_pending` enforces
         that ordering; if you queue by hand, do the same.
+
+        There is **no network route to wake the device early** -- nothing can be
+        pushed to it while it sleeps. ``app_wakeup`` on the USB console is the
+        one early-wake route that works: it recovered the reference sign from a
+        910-minute deep sleep on the spot, twice, and the sign reconnected with
+        ``ConnectReason`` ``"wakeup"``.
 
         Args:
             minutes: a positive number of minutes.
@@ -503,9 +524,10 @@ class DeviceConnection:
     def set_heartbeat(self, minutes: int) -> int:
         """``CommandType 7``. The same setting as TCLV parameter 29.
 
-        .. warning:: Unverified, like all of type 2. Writing TCLV 29 with
-           :meth:`write_params` is the attested route -- the param channel was
-           captured end to end.
+        .. warning:: Never observed on the wire. The type-2 framing is
+           settled, but this id's payload is read out of the binary only.
+           Writing TCLV 29 with :meth:`write_params` is the attested route --
+           the param channel was captured end to end.
         """
         return self.send_command(
             CommandType.SET_HEARTBEAT, int(minutes).to_bytes(4, "little")

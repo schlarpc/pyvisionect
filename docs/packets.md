@@ -35,14 +35,17 @@ mux versions (see [firmware.md](firmware.md)).
 
 ### What was actually seen on the wire
 
-The captured traffic covers types **1, 3, 5, 8 and 10** and nothing else. [W] In
+The captured traffic covers types **1, 2, 3, 5, 8 and 10** and nothing else. [W] In
 particular:
 
 - **Type 12 (CBOR) was never emitted.** Firmware 7.4.4407 does not use it. That channel
   belongs to the JS-app device generation. Implement the framing if you like; you will
   not need the body.
-- **Type 2 (command) has never been seen in either direction, in any capture.** See
-  [the warning below](#packet-type-2-command-is-unverified).
+- **Type 2 (command) is captured, for two of its 24 command ids.** `sleep` (4) and
+  `status request` (11) were provoked out of the vendor server on 2026-10-05, decoded off
+  the wire and traced through the device's own log. The 12-byte header is settled; the
+  other 22 ids are still code-read only. See
+  [below](#packet-type-2-command-is-unverified).
 
 ## Handler dispatch and who sends the ack
 
@@ -200,12 +203,14 @@ security-handshake packets, and a 10 s wait for the device's security ack. [D]
 
 ## Other payload layouts
 
-All little-endian. These are the vendor's Go struct layouts; see the caveat about struct
-versus wire disagreement [below](#packet-type-2-command-is-unverified).
+All little-endian. These are the vendor's Go struct layouts. Where a struct has been
+checked against the wire the two agree for type 2 and differ for type 8; see
+[below](#packet-type-2-command-is-unverified) and
+[parameters.md](parameters.md).
 
 | type | layout |
 |---|---|
-| 2 `command` | `Type uint32 @0`, `PayloadLength uint32 @4`, `Reserved uint32 @8`, then payload. Size 12 + payload. [D] |
+| 2 `command` | `Type uint32 @0`, `PayloadLength uint32 @4`, `Reserved uint32 @8`, then payload. Size 12 + payload. [D][W] — confirmed on the wire, `Reserved` included |
 | 3 `status` | a stream of 8-byte TLV records — [status.md](status.md) |
 | 5 `image` | `ImageHeader` (20 B) + `NrPrimitives` × (`RectangleHeader` (24 B) + payload) — [imaging.md](imaging.md) |
 | 6 `touch` | five uint32: `DisplayCRC`, `DisplayID`, `FingerNum`, `X`, `Y` (20 B) [D] |
@@ -215,23 +220,56 @@ versus wire disagreement [below](#packet-type-2-command-is-unverified).
 | 11 `button` | two uint32: `Active`, `State` (8 B) [D] |
 | 12 `CBOR` | `UserData uint32 @0`, `Reserved uint32 @4`, `Length uint32 @8`, then `Length` bytes of CBOR. [D] |
 
-## Packet type 2 (command) is unverified
+<a id="packet-type-2-command-is-unverified"></a>
 
-**Type 2 has never been observed on the wire, in either direction, in any capture.** [W]
-Everything below is read out of the Go struct and the enum's `String()` method. [D]
+## Packet type 2 (command): two ids captured, 22 still unverified
 
-That matters because **there is direct precedent in this protocol for the struct and the
-wire format disagreeing**: the Go command struct is 12 bytes, and the param packet's
-on-wire header is **8**, because `Reserved` is simply not emitted. Counted exactly in the
-capture: a param payload of 32 bytes with 24 bytes of TLVs leaves 8. [W]
+**The wire header is 12 bytes, and `Reserved` is emitted.** Two type-2 frames,
+server → device on port 11113, captured 2026-10-05 and decoded by this library
+unmodified: [W]
+
+```
+sleep            04000000 04000000 00000000 8e030000
+                   Type=4, PayloadLength=4, Reserved=0, payload = uint32 LE 910 (minutes)
+status request   0b000000 00000000 00000000
+                   Type=11, PayloadLength=0, Reserved=0, no payload
+```
+
+So the feared analogy with the param packet — whose Go struct is 12 bytes but whose wire
+header is **8**, because `Reserved` is not emitted ([parameters.md](parameters.md)) —
+**does not apply to type 2**. The status-request frame proves it on its own: 12 bytes of
+header with a zero-length payload.
+
+The device's side, from its serial console at log level 5: [W]
+
+| frame | what the firmware logs |
+|---|---|
+| `sleep` | `pv2_command_packet_handler.c:145, Cmd Pend (2)` → `System command received` → `Command sleep received` → `Wake after 910 minutes!` → deep sleep |
+| `status request` | `pv2_command_packet_handler.c:90, Cmd Pend (2)` → `System command received` → `Command status get received` → `vplatform_system_commands.c:171, Status Send (12)` → an unsolicited status packet |
+
+Both are acked by the device with a type-1 `Control{Flags: 1}` carrying the server's frame
+id, exactly like any device-originated packet in the other direction. The status that
+answers a status request carries `ConnectReason == 8` — `"by server request"`, read out of
+the binary before and now confirmed live. [W]
+
+**How these were triggered**, for anyone repeating it: neither is reachable from the
+vendor's API, so both came out of server configuration. `11`: add `"StatusRequester"` to
+`Config.Features`, set `Global.DeviceStatePolling` to 1 minute, and raise the device's own
+heartbeat above that, so the gateway's inactivity watchdog fires. `4`: add
+`"SleepManager"` to `Config.Features` and PUT `Options["SleepSchedule"]` on the device.
+
+**Every other command id has still never been seen on the wire**: 0, 1, 2, 3, 5, 6, 7, 8,
+9, 10, 12, 13, 14, 15, 16, 17, 18, 22, -1, -2, -3 and -4. The header is settled for all of
+them — that was the risk they shared — but each one's payload and effect is still read
+out of the binary and nothing more.
 
 The command type values, from the enum's compare chain. It is an **int32** — the negative
 values are real: [D]
 
 | value | string | | value | string |
 |---:|---|---|---:|---|
-| 0 | `reboot` | | 13 | `battery` |
-| 1 | `echo` | | 14 | `touch update` |
+| 0 | `echo` | | 13 | `battery` |
+| 1 | `reboot` | | 14 | `touch update` |
 | 2 | `configuration` | | 16 | `set gps` |
 | 3 | `AT command` | | 17 | `front light` |
 | 4 | `sleep` | | 18 | `sync display` |
@@ -240,40 +278,65 @@ values are real: [D]
 | 7 | `set heartbeat` | | -2 | `clear screen` |
 | 8 | `set network retries` | | -3 | `keyboard` |
 | 9 | `LED window` | | -4 | `beep` |
-| 10 | `LDRLED` | | 15 | *(no case: `unknown`)* |
+| 10 | `LDRLED` | | 15 | *(no case: prints `unknown` — but emitted; see below)* |
 | 11 | `status request` | | | |
 | 12 | `system` | | | |
 
-> **The two versions of this enum disagree on values 0 and 1.** The table above is the
-> **v2** `packet.CommandType`, which is what this protocol version uses. The legacy **v1**
-> `proto.CommandID` enum — also linked into the same binary — has them the other way
-> round: `0 = echo`, `1 = reboot`. [D] Both were read independently out of their
-> respective `String()` methods. Nothing on the wire disambiguates them, and neither value
-> has been observed. **Given that one of the two is `reboot`, do not guess.** This is a
-> good reason to prefer the verified routes below.
+> **The two versions of this enum agree: 0 is `echo`, 1 is `reboot`.** An earlier
+> revision of these notes claimed v1 `proto.CommandID` and v2 `packet.CommandType`
+> disagreed on exactly those two values. They do not — that was a transcription error when
+> the v2 table was first written down, and the table above is the corrected one. Both
+> `String()` chains in `bin/gateway` — `proto.CommandID.String` @ `0x8040a0` and
+> `packet.CommandType.String` @ `0x8912e0` — load the **same two rodata strings in the
+> same order**: value 0 → `0x182dfdd` `"echo"` (len 4), value 1 → `0x18302ec` `"reboot"`
+> (len 6). The rest of both chains is identical too. [D]
+>
+> Independently: `bin/networkmanager` `main.(*Panda).Reboot` @ `0x1026420` is the vendor's
+> only reboot emitter anywhere in the suite, and at `0x10265e5` it writes
+> `movabs $0x400000001; mov %rcx,(%rax)` into the command-builder struct — `Command = 1`,
+> `PayloadLength = 4`, with the 4-byte payload holding its bool argument. [D]
+>
+> The error was worth catching: with the old values, a `reboot()` call would have sent
+> `echo` and an "echo" would have rebooted the sign. That is exactly the class of mistake
+> the `allow_command_packets` opt-out exists to contain.
 
 How well attested each one is: [D]
 
-- **11 `status request`** is the best attested — it is what the inactivity watchdog
-  emits.
-- **4 `sleep`** has a traced payload: one little-endian uint32 of **minutes**, which must
-  be non-zero (0 is rejected server-side as `errSleepTime`). The server-side helper that
-  builds it writes the command value as an immediate `$0x4`, so this one id is
-  unambiguous despite the enum conflict above. Note that **nothing can wake a sleeping
-  device early** — there is no server-to-device push while it is asleep.
+- **11 `status request`** and **4 `sleep`** are the two captured above. `sleep` carries
+  one little-endian uint32 of **minutes**, which must be non-zero (0 is rejected
+  server-side as `errSleepTime`); the observed frame carried 910.
+- **15** is **not an unused slot**, even though both `String()` chains print `unknown` for
+  it. `bin/engine` `vss/pkg/command/stdcmd.DisplayID.Done` writes `15` (immediate at
+  `0xcfc5c5`) with a uint32 panel-type id in 1..10, rejecting 0 and anything above 10 with
+  `"invalid display id"`. [D]
 - **7 `set heartbeat`** likewise takes a uint32 of minutes, rejecting bad values with
   `"invalid heartbeat interval"`. Prefer TCLV parameter 29, which is network-writable.
-- **9 `LED window`** corresponds to a server-side option formatted as `"<a>:<b>"`; it is
-  for front-light-equipped signs.
+- **9 `LED window`** corresponds to a server-side option formatted as `"<a>:<b>"`, for
+  front-light-equipped signs — but nothing ever sends it; see below.
 - **18 `sync display`** is the synchronised flip for a multi-device display group.
-- **`-1 refresh` and `-2 clear screen` have no emission site anywhere in the vendor
-  server.** They are enum entries and nothing else.
+- **Five ids have no emission site anywhere in the vendor suite**: **9** (`LED window`),
+  **10** (`LDRLED`), **-1** (`refresh`), **-2** (`clear screen`) and **-3** (`keyboard`).
+  They are enum entries and nothing else. **-4 (`beep`) is not one of them** — it is built
+  inline in `vss/pkg/backend/webkit.generateCommand` at `0xea054d`
+  (`movabs $0x2fffffffc`). [D]
 - The rest were not traced to a call site.
 
 **Recommendation.** Prefer a verified route wherever one exists: an image push instead of
 `refresh` or `clear screen`, a TCLV parameter write instead of `set heartbeat`. A reboot
 is at least observable after the fact — the device reconnects with `ConnectReason = 1`
 (`reboot`).
+
+### Two things about `sleep` that bite
+
+- **`SleepSchedule = 0` does not mean "no sleep".** With `"SleepManager"` enabled and no
+  `Options["WorkHours"]` set, the sleep manager computed "sleep until local midnight" and
+  sent `sleep` with **910 minutes**. The device obeyed instantly. [W]
+- **A sleeping device cannot be woken over the network — but it can be woken over the USB
+  console.** There is no server-to-device push while the device is asleep, so the network
+  has no early-wake route. `app_wakeup` on the serial CLI does: it brought the sign out of
+  a 910-minute deep sleep immediately, twice, and the sign reconnected with
+  `ConnectReason` `"wakeup"`. [W] That is the recovery procedure if the previous point
+  catches you out.
 
 ## The file protocol (type 10)
 

@@ -110,7 +110,10 @@ RECTANGLE_UPDATE_OPTIONS_DEFAULT: dict[int, int] = {
 #: ``RectangleHeader.Options`` bit 1 is the "normal update" bit.  The server
 #: *clears* it on every rectangle of one full-screen packet to request an
 #: inverse / ghost-clearing refresh (``image-state.go:1519-1522``).  Spec §1.4,
-#: §5.
+#: §5.  Verified on hardware: with the bit clear the firmware logs ``inv: 1``
+#: and ``Force Inverse and full area update``, with it set ``inv: 0``.  Since
+#: the vendor ships ``RectangleFlags = 0``, the default is to invert on *every*
+#: full-screen push.
 OPTION_NORMAL_UPDATE = 0x0002
 
 #: ``maxRegions`` -- hard constant in ``displayRects.update``

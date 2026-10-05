@@ -160,7 +160,8 @@ class ListenError(VisionectError):
 class CommandPacketsDisabled(VisionectError):
     """A ``packet.Type 2`` (command) send was attempted with them disabled.
 
-    Packet type 2 has never been observed on the wire; see the warning at the
+    Only two of the 24 type-2 command ids have ever been observed on the wire
+    (``sleep`` and ``status request``, 2026-10-05); see the note at the
     top of :mod:`pyvisionect.packets.misc`.  ``ConnectionConfig(
     allow_command_packets=False)`` lets a cautious consumer guarantee that none
     are ever emitted.

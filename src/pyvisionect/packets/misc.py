@@ -3,29 +3,34 @@
 All little-endian, all small.  ``command`` (2) is server-to-device only; the
 others are device-to-server.
 
-.. warning::
-   **Packet type 2 (``command``) has never been observed on the wire.**
+.. note::
+   **Packet type 2 (``command``) is captured for 2 of its 24 command ids.**
 
-   Not in either direction, in any capture.  The captured traffic covers types
-   1 (control), 3 (status), 5 (image), 8 (param) and 10 (file) and nothing
-   else.  So :class:`CommandPacket`'s 12-byte ``CommandHeader``
-   (``Type`` / ``PayloadLength`` / ``Reserved``) is read out of the Go struct
-   and *nothing more*.
+   ``sleep`` (4) and ``status request`` (11) were provoked out of the vendor
+   server on 2026-10-05 and decoded off the wire by :class:`CommandPacket`
+   unmodified::
 
-   That matters because there is **direct precedent in this very protocol for
-   the Go struct and the wire format disagreeing**: ``proto.Command``'s struct
-   is 12 bytes, and the param packet's on-wire header is **8** -- ``Reserved``
-   is simply not emitted.  Counted off the capture: a 32-byte param payload
-   carried 24 bytes of TLVs.  If the same is true of type 2, the header here is
-   four bytes too long and every command this library sends is malformed.
+       sleep           04000000 04000000 00000000 8e030000
+       status request  0b000000 00000000 00000000
 
-   Beyond the layout, two of the command ids have **no emission site anywhere
-   in the vendor server**: ``-1`` ("refresh") and ``-2`` ("clear screen") are
-   entries in ``packet.CommandType.String``'s jump table and nothing else --
-   nothing in the suite ever sends them.  ``11`` ("status request") is the
-   best-attested one, emitted by the ping watchdog at ``pv3.go:1087-1088``, and
-   ``4`` ("sleep") has a traced payload format
-   (``stdcmd.Sleep.Done``: one little-endian uint32 of minutes, non-zero).
+   So the 12-byte ``CommandHeader`` (``Type`` / ``PayloadLength`` /
+   ``Reserved``) is **real**, and ``Reserved`` is emitted.  The precedent that
+   made it suspect no longer applies: ``proto.Command``'s struct is 12 bytes
+   and the param packet's on-wire header is **8**, because ``Reserved`` is
+   simply dropped there -- but type 2 emits it.  The zero-payload status
+   request settles that on its own: 12 bytes of header, nothing after.  The
+   device acks both frames with ``Control{Flags: 1}``, and the status that
+   answers a status request carries ``ConnectReason == 8`` ("by server
+   request").
+
+   **Every other command id has never been observed on the wire**, in either
+   direction, so the payload and effect of the remaining 22 are code-read
+   only.  Five of them have **no emission site anywhere in the vendor
+   server**: ``9`` (LED window), ``10`` (LDRLED), ``-1`` (refresh), ``-2``
+   (clear screen) and ``-3`` (keyboard).  ``-4`` ("beep") does have one, built
+   inline in ``webkit.generateCommand``; and ``15`` is emitted by
+   ``stdcmd.DisplayID.Done`` even though both ``String()`` chains print
+   ``unknown`` for it.
 
    Consequences for a consumer:
 
@@ -33,7 +38,8 @@ others are device-to-server.
      ``refresh``/``clear_screen``, a TCLV write instead of ``set_heartbeat``;
    * ``ConnectionConfig(allow_command_packets=False)`` refuses to emit type 2
      at all, so an integration can ship a "safe mode" and a test suite can
-     assert that nothing slipped through;
+     assert that nothing slipped through.  Two ids out of 24 is not enough to
+     take the other 22 on trust;
    * a reboot *is* observable after the fact: the device reconnects with
      ``ConnectReason == 1``, which
      :attr:`~pyvisionect.packets.StatusPacket.connect_reason_name` reports.
@@ -65,8 +71,13 @@ _CBOR = struct.Struct("<3I")
 class CommandPacket:
     """``packet.CommandHeader`` + payload (12 + N bytes).
 
+    The 12-byte header is confirmed on the wire, ``Reserved`` included: this
+    codec decoded both captured type-2 frames with no change (see the module
+    note).
+
     ``Type`` is a signed int32: ``-1`` refresh, ``-2`` clear screen,
-    ``-3`` keyboard, ``-4`` beep are all real values.
+    ``-3`` keyboard, ``-4`` beep are all real values.  ``0`` is **echo** and
+    ``1`` is **reboot**, in both the v1 and the v2 enum.
     """
 
     type: int

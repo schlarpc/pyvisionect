@@ -92,9 +92,18 @@ __all__ = [
 SENTINEL_TAG = 0xFFFFFFFF
 """The record that terminates the list. v1 calls the tag ``LastStatus``.
 
-Its *value* changes with the payload contents; it is almost certainly a checksum
-or nonce over the records, but that was not confirmed, so we carry it verbatim
-and never interpret it.
+Its *value* is **the CRC-32/ISO-HDLC of every record byte that precedes it** --
+the ordinary zlib/PNG CRC-32, i.e. ``zlib.crc32(payload[:-8])``. Confirmed on
+16 of 16 live status frames (2026-10-05), across three TCP connections and three
+connect reasons.
+
+We still carry it verbatim and never enforce it, for one concrete reason: the
+committed golden fixture **fails** the check, by a constant ``0xe63fe9a0``,
+because the fixture is scrubbed and ``BSSID`` lives inside the CRC'd region.
+Substituting the same bytes into every frame of a fixed-length region shifts
+every CRC by the same amount, which is exactly what is observed. So anything
+that validated this would reject our own test data, and any future scrub has to
+recompute it.
 """
 
 ABSENT = 0xFFFFFFFF
@@ -450,11 +459,13 @@ class StatusPacket:
     def connect_reason_name(self) -> str:
         """Status tag 0, named: ``"reboot"``, ``"wakeup"``, ``"heartbeat"``, ...
 
-        The cheapest confirmation available that an unverified type-2 command
-        landed: a reboot command that worked shows up as the device reconnecting
-        with reason ``1`` (``"reboot"``), and a server-requested status as ``8``
-        (``"by server request"``). Unknown values render ``"n/a"``, as the
-        vendor's own ``String()`` does.
+        The cheapest confirmation available that a type-2 command landed: a
+        reboot command that worked shows up as the device reconnecting with
+        reason ``1`` (``"reboot"``), and a server-requested status as ``8``
+        (``"by server request"``) -- ``8`` **confirmed live** 2026-10-05, as the
+        answer to a captured ``status request`` command, and ``2`` (``"wakeup"``)
+        as the answer to an ``app_wakeup`` out of deep sleep. Unknown values
+        render ``"n/a"``, as the vendor's own ``String()`` does.
         """
         reason = self.connect_reason
         if reason is None:

@@ -41,8 +41,11 @@ Two things that bite
   redraws.  :mod:`pyvisionect.imaging` computes it.
 
 ``Rectangle.options`` bit ``0x0002`` **cleared** on all rectangles of one
-full-screen packet requests an inverse update. [INFERRED -- the firmware's
-reaction was not verified on hardware.]
+full-screen packet requests an inverse update.  Verified on hardware by A/B:
+``options=0`` makes the firmware log ``inv: 1`` and ``Force Inverse and full
+area update``, ``options=2`` makes it log ``inv: 0`` with no such line.  So
+*clear* means inverse, and the vendor's shipped default of 0 inverts on every
+full-screen push.
 """
 
 from __future__ import annotations
@@ -77,7 +80,9 @@ MAX_RECTANGLES = 15
 
 OPTION_NOT_INVERSE = 0x0002
 """``RectangleHeader.Options`` bit. Cleared on every rectangle of a full-screen
-packet = inverse update. [INFERRED]"""
+packet = inverse update; set = ordinary update. Verified on hardware (A/B
+against the firmware's ``inv:`` log line), and the vendor's admin UI labels the
+value ``0`` "Enable" and ``2`` "Disable" for exactly this key."""
 
 _IMG = struct.Struct("<5I")
 _RECT = struct.Struct("<10HI")

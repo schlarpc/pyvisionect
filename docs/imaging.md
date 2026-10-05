@@ -82,19 +82,36 @@ if isFullScreen && nextFullScreenIsInverseUpdate {
 ```
 
 So **bit `0x0002` is the "normal update" bit, and clearing it requests an inverse /
-ghost-clearing refresh.** With the shipped default of 0 the bit is already clear, so a
-default vendor deployment never actually signals an inverse update — which means a
-reimplementation that wants inverse updates must configure `Options` so that bit 1 is
-*normally set*. **[I]** that the firmware reads a cleared bit 1 as "use the clearing
-waveform"; the server's bit manipulation is verified, the firmware's reaction is not.
-[GAP]
+ghost-clearing refresh.** The firmware reads this bit, and the polarity is **verified on
+hardware** — a controlled A/B on the live sign, driving the vendor server and watching
+both the wire and the sign's serial console: [W]
 
-The only trigger for an inverse update in the whole vendor server is a **timer**, not a
-command: a 120 s ticker that fires a full-screen inverse re-render when the session has
-been idle longer than a per-session timeout, and it is only started for firmware older
-than a compiled-in constant (newer firmware is assumed to manage its own ghosting). [D]
-**There is no API or command route to request one** — the sole caller of the
-inverse-update entry point is that timer. [D]
+| session `Options["RectangleFlags"]` | wire | firmware log |
+|---|---|---|
+| unset or `0` (the shipped default) | `Rectangle(..., options=0, update_options=258)` | `u: (0   0   0 2880 640), wfn: 2, dum: 1, inv: 1`, then `Force Inverse and full area update`, `border (0 1)`, `UPD_FULL` |
+| `"2"` | `options=2` | `u: (0   0   0 2880 640), wfn: 2, dum: 1, inv: 0`, no `Force Inverse` line, and `UPD_FULL_AREA` instead of `UPD_FULL` |
+
+The firmware's own profiling line differs with it too: `ImgOpt=0x00003024` with the bit
+clear, against `ImgOpt=0x00000124` with it set.
+
+The vendor's own UI settles the semantics independently. The admin web app's per-session
+**"Inverse updates"** dropdown writes exactly this key (`data/admin/all.js`,
+`<select name="sessionInverseUpdates">`), with options `1` = "Server default" (which
+deletes the key), **`0` = "Enable"** and **`2` = "Disable"**. [D]
+
+**So `RectangleFlags = 0`, the shipped default, means inverse updates are *enabled*.** The
+bit is clear on **every** full-screen push, and a default deployment therefore inverts on
+every push rather than never signalling one. That is the reverse of the earlier reading
+here, which assumed the signal was a rare one-shot. To get a non-inverting push, set bit 1
+— `RectangleFlags = 2`.
+
+The only trigger for the server's *one-shot* inverse update is a **timer**, not a command:
+a 120 s ticker that fires a full-screen inverse re-render when the session has been idle
+longer than a per-session timeout, and it is only started for firmware older than a
+compiled-in constant (newer firmware is assumed to manage its own ghosting). [D] **There
+is no API or command route to request one** — the sole caller of the inverse-update entry
+point is that timer. [D] On a default configuration that one-shot is moot: it clears a bit
+that is already clear.
 
 ## Encodings
 
@@ -783,7 +800,7 @@ refreshes. Nothing in the server reads it; it is a wear metric. [D]
 | transport checksum | CRC-32/IEEE |
 | image packet type | **5** |
 | `RectangleUpdateOptions` auto-default | `0x0101` (1 bpp) / `0x0102` (4 bpp) |
-| inverse-update signal | clear `RectangleHeader.Options & 0x0002` |
+| inverse-update signal | clear `RectangleHeader.Options & 0x0002` — clear = inverse, verified on hardware |
 | anti-ghost timer | 120 s tick, fires when idle past a per-session timeout, old firmware only |
 | max regions per display | 15 |
 | max partial updates before a forced full | 10 |

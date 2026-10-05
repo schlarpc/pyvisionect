@@ -11,13 +11,20 @@ Status key: **OPEN** (nobody has tried) · **BLOCKED** (needs hardware or data w
 
 ## Protocol gaps
 
-### The inverse-update signal: the firmware's reaction — INFERRED
+### The inverse-update signal: the firmware's reaction — ANSWERED: clear means inverse
 
-Clearing `RectangleHeader.Options` bit `0x0002` on a full-screen packet is verified
-**server-side**. That the firmware reads it as "use the clearing waveform" is inference.
-With the shipped configuration the bit is already clear, so a default deployment never
-signals it; proving it needs a configuration in which bit 1 is *normally set*, then a
-comparison of the panel's behaviour across one packet with the bit cleared.
+Settled by a controlled A/B on the live sign on 2026-10-05, driving the vendor server and
+watching both the wire and the serial console. With `Options["RectangleFlags"]` unset or
+`0` the wire carries `options=0` and the firmware logs `inv: 1` plus `Force Inverse and
+full area update`; with `RectangleFlags = "2"` it carries `options=2` and the firmware logs
+`inv: 0` with no `Force Inverse` line. The firmware's profiling line moves with it
+(`ImgOpt=0x00003024` versus `0x00000124`). The vendor's admin UI agrees: its per-session
+"Inverse updates" dropdown writes this same key with `0` = "Enable" and `2` = "Disable".
+
+The old entry's *premise* was wrong too. `RectangleFlags = 0` is the shipped default, so
+the bit is clear on every full-screen push and a default deployment inverts on **every**
+push — not, as assumed here, never. The server's `nextFullScreenIsInverseUpdate` one-shot
+only clears a bit that is already clear.
 
 See [imaging.md](imaging.md#imageheaderoptions-and-rectangleheaderoptions).
 
@@ -67,23 +74,35 @@ unverified whether parameter 145 survives a reboot without an explicit `flash_sa
 > **One-way door.** Enabling 145 against a server with no certificate strands the device,
 > recoverable only over the serial console. Certificate first, then flip.
 
-### Packet type 2 (command) is entirely unverified — OPEN
+### Packet type 2 (command) — ANSWERED for 2 of 24 ids: the 12-byte header is real
 
-Never captured, in either direction, in any capture. The 12-byte header is read out of the
-Go struct and nothing more — and there is **direct precedent in this protocol for the
-struct and the wire format disagreeing** (the param packet's struct is 12 bytes, its wire
-header is 8).
+Captured 2026-10-05, server → device, and decoded by this library unmodified: `sleep` (4)
+as a 16-byte payload and `status request` (11) as a 12-byte one. So the 12-byte
+`CommandHeader` is real and **`Reserved` is emitted** — the param-packet precedent (struct
+12, wire 8) does **not** apply to type 2, and the zero-payload status request proves it on
+its own. The device acks both with `Control{Flags: 1}`, and the status that answers a
+status request carries `ConnectReason == 8` ("by server request").
 
-Worse, **the v1 and v2 versions of the command enum disagree on values 0 and 1**, and one
-of those two is `reboot`. See
-[packets.md](packets.md#packet-type-2-command-is-unverified).
+Two related claims in the old entry were also wrong, and are corrected:
 
-Two of the command ids — `refresh` and `clear screen` — have **no emission site anywhere
-in the vendor server**; they are enum entries and nothing else.
+- **The v1 and v2 command enums do not disagree.** `0` is `echo` and `1` is `reboot` in
+  both; the old claim came from a transcription error when the v2 table was written down.
+- **`-4` (`beep`) does have an emitter**, built inline in
+  `vss/pkg/backend/webkit.generateCommand`. The ids with no emitter anywhere are `9` (LED
+  window), `10` (LDRLED), `-1` (refresh), `-2` (clear screen) and `-3` (keyboard). And
+  `15` *is* emitted — by `stdcmd.DisplayID.Done`, with a panel-type id in 1..10 — even
+  though both `String()` chains print `unknown` for it.
 
-**To settle it:** nothing on the wire will do it. Either find a capture from a deployment
-that uses these, or probe cautiously against hardware you can physically recover, starting
-with `echo`/`reboot` once you have determined which is which.
+See [packets.md](packets.md#packet-type-2-command-is-unverified).
+
+**Still open: the payload and effect of the other 22 ids** — 0, 1, 2, 3, 5, 6, 7, 8, 9,
+10, 12, 13, 14, 15, 16, 17, 18, 22, -1, -2, -3, -4. Two of 24 is not enough to trust the
+rest by default, so the `allow_command_packets` opt-out stays worth setting. What would
+retire the caution for a given id is the same thing that retired it for these two: a
+frame on the wire, provoked out of the vendor server by configuration, with the device's
+serial console confirming what it did. Probing straight against hardware is now less
+dangerous than it was — the header is known good and `echo`/`reboot` are no longer
+ambiguous — but it is still a probe.
 
 ### Remaining small gaps — OPEN
 
@@ -358,8 +377,13 @@ Stated so nobody assumes coverage:
   The whole cellular path — APN configuration, link type, the `MobSecurity` value space —
   is unexercised.
 - **Ethernet devices**, likewise.
-- **Server-scheduled sleep.** The vendor server has a sleep scheduler with timezone and
-  working-hours logic, which emits command type 4. It was read out of the binary and
-  **never exercised**, because the deployment it was read from had the feature gated off.
-  Note its one surprising detail: sleeps longer than 60 minutes are **quantised to whole
-  hours**, and nothing can wake a sleeping device early.
+- **Server-scheduled sleep** is no longer unexercised. Driven on 2026-10-05 by adding
+  `"SleepManager"` to `Config.Features` and PUTting `Options["SleepSchedule"]`: the server
+  emitted command type 4 with **910 minutes** and the device slept immediately. Two things
+  came out of it. **`SleepSchedule = 0` does not mean "no sleep"** — with no
+  `Options["WorkHours"]` set the manager computed "sleep until local midnight" and sent
+  that. And 910 is not a whole-hour multiple, so the "sleeps over 60 minutes are quantised
+  to whole hours" reading does not hold on this path. The **network** cannot wake a
+  sleeping device early, but the **USB console can**: `app_wakeup` brought the sign out of
+  a 910-minute deep sleep immediately, twice, and it reconnected with `ConnectReason`
+  "wakeup". That is the recovery procedure if the `SleepSchedule = 0` surprise catches you.

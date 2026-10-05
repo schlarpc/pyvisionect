@@ -368,9 +368,11 @@ so the lengths below are recomputed to stay self-consistent. The structure is ve
 ```
 
 Note the on-wire header here is **8 bytes**, not the 12 bytes of the vendor's Go struct —
-`Reserved` is simply not emitted. Counted exactly: 32 − 24 = 8. [W] This is the precedent
-that makes the unverified command packet (type 2) suspect; see
-[packets.md](packets.md#packet-type-2-command-is-unverified).
+`Reserved` is simply not emitted. Counted exactly: 32 − 24 = 8. [W] This was the precedent
+that made the command packet (type 2) suspect — **and type 2 turned out not to follow it**:
+captured on 2026-10-05, its header really is 12 bytes with `Reserved` emitted. See
+[packets.md](packets.md#packet-type-2-command-is-unverified). The truncation is a property
+of the param packet, not of the protocol.
 
 The device **first acks the request** with a control packet carrying the same ID, then
 ~200 ms later sends its reply as a packet of its own, using its own ID counter: [W]

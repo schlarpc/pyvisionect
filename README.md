@@ -127,7 +127,9 @@ sent = conn.apply_pending()       # {slot: packet_id}, in PENDING_ORDER
 
 Steps 5→7 are the one that bites: the vendor waits for its renderer before
 publishing its sleep packet, and getting it wrong leaves the user staring at
-yesterday's dashboard for a day.
+yesterday's dashboard for a day. There is no network route to wake a sleeping
+sign early; `app_wakeup` on the USB console is the only one, and it works — it
+recovered a sign from a 910-minute sleep on the spot.
 
 Each slot clears **only on an ack**, so a connection that drops mid-reconcile
 leaves the remainder queued:
@@ -608,31 +610,37 @@ DataHeader      36 B LE   Priority | DeviceID[16] | Type | ID | Length | Reserve
   A device NACK carries a 4-byte error code — `0x00008a00` for the `@screen_N`
   open that this hardware always refuses.
 
-### Packet type 2 (command) has never been seen on the wire
+### Packet type 2 (command): two of its 24 ids are captured, 22 are not
 
-Not in either direction, in any capture. The captured traffic covers types 1
-(control), 3 (status), 5 (image), 8 (param) and 10 (file) and nothing else. So
-`CommandPacket`'s 12-byte header is read out of the Go struct and nothing more
-— and there is **direct precedent in this protocol for the struct and the wire
-format disagreeing**: `proto.Command`'s struct is 12 bytes and the param
-packet's on-wire header is **8**, because `Reserved` is simply not emitted.
+`sleep` (4) and `status request` (11) were provoked out of the vendor server on
+2026-10-05 and decoded off the wire by this library unmodified. So
+`CommandPacket`'s 12-byte header is **real** and `Reserved` **is** emitted — the
+param packet's struct-versus-wire mismatch (struct 12 bytes, wire header 8,
+`Reserved` dropped) does not extend to type 2. The status-request frame proves
+that on its own: `0b000000 00000000 00000000`, 12 bytes of header and no
+payload. The device acks both with `Control{Flags: 1}`.
 
-Two of the command ids have no emission site anywhere in the vendor server:
-`-1` ("refresh") and `-2` ("clear screen") are enum entries and nothing else.
-`11` ("status request") is the best attested, emitted by the ping watchdog.
-`4` ("sleep") has a traced payload — one little-endian uint32 of minutes,
-non-zero, rejected as `errSleepTime` at 0, and `sleep()` validates that.
+Also settled: **`CommandType` 0 is `echo` and 1 is `reboot`**, in both the v1 and
+the v2 enum. An earlier revision of these notes had the two swapped, which would
+have made `reboot()` send `echo` and an "echo" reboot the sign.
 
-So: prefer a verified route where one exists — an image push instead of
-`refresh`/`clear_screen`, a TCLV write instead of `set_heartbeat` — and if you
-want a guarantee:
+Every other id has still never been seen, and five have no emission site
+anywhere in the vendor suite: `9` (LED window), `10` (LDRLED), `-1` (refresh),
+`-2` (clear screen) and `-3` (keyboard). So: prefer a verified route where one
+exists — an image push instead of `refresh`/`clear_screen`, a TCLV write instead
+of `set_heartbeat` — and if you want a guarantee:
 
 ```python
 ConnectionConfig(allow_command_packets=False)   # refuses to emit type 2 at all
 ```
 
-A reboot is at least observable after the fact: the device reconnects with
-`ConnectReason == 1`, which `status.connect_reason_name` reports.
+Two of 24 is not enough to take the other 22 on trust, so that opt-out is still
+worth setting. What retires the caution for an id is what retired it for these
+two: a frame on the wire plus the device's serial console saying what it did.
+Meanwhile the effects are observable after the fact — a reboot shows up as the
+device reconnecting with `ConnectReason == 1`, and the status answering a status
+request carries `ConnectReason == 8` ("by server request"). Both are reported by
+`status.connect_reason_name`.
 
 ### There is no `list` opcode, and `@screen_N` is not about updates
 
@@ -910,9 +918,11 @@ came from: a Go symbol and source line from the unstripped `bin/gateway`
 (`proto/v2` v2.1.5, `proto` v1.2.23), a byte offset in the captured traffic, or
 the vendor's published CLI reference. A handful of things are marked `[INFERRED]`
 or `[GAP]` because they were not provable from the material available — notably
-`packet.Priority`'s value space, the meaning of the status sentinel's value, the
-`GPS` coordinate string framing, the `sleep` command's payload layout, and the
-inverse-update option bit. Those are flagged in place rather than smoothed over.
+`packet.Priority`'s value space, the meaning of the status sentinel's value and
+the `GPS` coordinate string framing. Those are flagged in place rather than
+smoothed over. The `sleep` command's payload layout and the inverse-update
+option bit were on that list until 2026-10-05; both are now verified on
+hardware.
 
 ## Licence
 

@@ -143,12 +143,18 @@ so `imaging/` works without it, and the test suite checks the two against each o
 ## Inverse (ghost-clearing) updates
 
 `encode_frame(..., inverse=True)` **clears** `RectangleHeader.Options` bit `0x0002` on
-every rectangle of one full-screen frame. With the vendor's shipped
-`RectangleFlags = 0` the bit is already clear, so you must pass `rect_options` with bit
-1 set for the signal to mean anything.
+every rectangle of one full-screen frame. Clear means inverse; set means an ordinary
+update.
 
-**The firmware's reaction to this is `[INFERRED]`.** The server-side bit manipulation
-was read out of the binary; what the panel does with it was never observed.
+**Verified on hardware**, by A/B on the live sign: `options=0` makes the firmware log
+`inv: 1` and `Force Inverse and full area update`, `options=2` makes it log `inv: 0` with
+no such line (`ImgOpt=0x00003024` against `0x00000124`). The vendor's admin UI writes the
+same key from its "Inverse updates" dropdown, where `0` is "Enable" and `2` is "Disable".
+
+So with the vendor's shipped `RectangleFlags = 0` the bit is **already clear and every
+full-screen push inverts.** `inverse=True` is therefore a no-op on a default
+configuration; pass `rect_options` with bit 1 set to get ordinary updates, and clear it
+again for the pushes you want inverted.
 
 ## What is verified against real device bytes
 

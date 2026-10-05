@@ -808,12 +808,44 @@ is a very different UX promise from "up to a minute".
 
 ## B. Protocol gaps — understood but unverified
 
-### B1. Inverse update: the firmware's reaction — INFERRED
-Clearing `RectangleHeader.Options` bit `0x0002` on a full-screen packet is
-verified *server-side*. That the firmware reads it as "use the clearing
-waveform" is inference. With `RectangleFlags = 0` the bit is already clear, so
-this deployment never signals it; proving it needs `RectangleFlags` to normally
-set bit 1.
+### B1. Inverse update: the firmware's reaction — **ANSWERED: the firmware inverts, and a default deployment inverts on *every* push** (2026-10-05)
+
+`RectangleHeader.Options` bit `0x0002` is read by the firmware, and **clear means
+"use the inverse / clearing waveform"**. Settled by an A/B on the live sign with
+the sign temporarily pointed back at VSS, driving VSS through its REST API and
+watching the wire and the serial console (`vlog_unify_levels 5`) at the same time:
+
+| session `Options["RectangleFlags"]` | on the wire | firmware narration |
+|---|---|---|
+| absent — the shipped default | `Rectangle(..., options=0, update_options=258)` | `u: (0 0 0 2880 640), wfn: 2, dum: 1, inv: 1` → `Force Inverse and full area update` → `border (0 1)` → `UPD_FULL` |
+| `"2"` | `options=2` | `u: (0 0 0 2880 640), wfn: 2, dum: 1, inv: 0` — no `Force Inverse` line — → `border (0 1)` → `UPD_FULL_AREA` |
+
+The firmware's own profiling line agrees: `ImgOpt=0x00003024` with the bit clear
+against `ImgOpt=0x00000124` with it set.
+
+**And the premise of this entry was backwards.** The admin UI's per-session
+**"Inverse updates"** selector writes exactly this key (`data/admin/all.js`,
+`<select name="sessionInverseUpdates">`): `1` = "Server default" (deletes the
+key), **`0` = "Enable"**, **`2` = "Disable"**. So `RectangleFlags = 0` does not
+mean "this deployment never signals an inverse update" — it means inverse updates
+are *on*: the bit is clear on **every** full-screen push, and this sign has been
+running a clearing waveform on every redraw all along. The engine's one-shot
+`nextFullScreenIsInverseUpdate` (`image-state.go:1519-1522`) only clears a bit
+that is already clear here, which is exactly why it was invisible.
+
+Two notes for anyone repeating it:
+
+* A forced re-render needs a *content* change, not just
+  `POST /api/session/restart`. With identical pixels and a matching
+  `DisplayStateCRC` the engine sends nothing at all. Flipping
+  `Options["DefaultDithering"]` between `none` and `floyd-steinberg` guarantees a
+  full-screen push and is trivially reversible.
+* `RectangleFlags` is a **session** option (`render-settings.go:84`), not a device
+  one, and it takes effect on session restart.
+
+Not reached: the one-shot path itself. `reRenderTimeoutStart` is only armed for
+firmware *older* than the engine's constant, and never for 7.4.4407. Moot — the
+bit's meaning was the question, and the bit is the whole signal.
 
 ### B2. Rectangle alignment growth order — INFERRED
 `W*H` must divide into 16-bit quanta, and the vendor grows the rect outward —
@@ -832,14 +864,180 @@ sides update the IV between chunks and the rule was not pinned; standard CBC
 chaining off the previous chunk's ciphertext tail is likely but unproven.
 Academic while we ship `Security = 0`.
 
-### B5. Remaining `[GAP]`s — OPEN
-`packet.Priority`'s value space; the meaning of the status sentinel's *value*
-(carried verbatim, never interpreted); the GPS coordinate string framing.
+### B5. Remaining `[GAP]`s — **ONE ANSWERED, TWO UNREACHED** (2026-10-05)
 
-### B6. All of packet type 2 (command) is unverified — OPEN
-Never captured. The param packet is precedent for the Go struct (12 B) and the
-wire (8 B) disagreeing, so type 2 is flagged in the API, `refresh`/`clear_screen`
-route through image pushes instead, and `reboot` ships disabled by default.
+**The status sentinel's value: ANSWERED. It is a CRC-32.** The value carried by
+tag `0xFFFFFFFF` is the CRC-32/ISO-HDLC (the zlib/PNG one: reflected, init
+`0xFFFFFFFF`, final XOR `0xFFFFFFFF`, i.e. plain `zlib.crc32`) of **every record
+byte that precedes it**:
+
+```python
+zlib.crc32(status_payload[:-8]) == struct.unpack_from("<I", status_payload, -4)[0]
+```
+
+16 of 16 live status frames, across three separate TCP connections and three
+connect reasons (5 heartbeat, 2 wakeup, 9 by-server-request — the last two also confirmed
+live for the first time here). So it is a checksum over the records, not a nonce,
+and a receiver can validate a status packet rather than trusting it.
+
+**Why the golden fixture cannot confirm this — and why the library documents it
+instead of enforcing it.** All 26 status frames in `tests/fixtures/golden.json.gz`
+fail the check, and they fail it by a *constant* `0xe63fe9a0`. That is the
+signature of a scrub, not of a different algorithm: the fixture is scrubbed
+(`DataHeader.DeviceID` is the `00112233-4455-…` placeholder and the `BSSID`
+records read `00:00:5E:00:53:00`), `BSSID` lives *inside* the CRC'd region, and
+substituting the same bytes in every frame of a fixed-length region shifts every
+CRC by the same amount. Solving for a seed confirms it: `zlib.crc32(body,
+0x613fa514)` matches all 26. So anything that validated this checksum would reject
+our own test fixtures, and any future scrub has to recompute it.
+
+**`packet.Priority`: UNREACHED, and probably unreachable from the server side.**
+`priority` and `reserved` were `0` in all **69** frames of this capture as well
+— now across packet types 1, 2, 3, 5 and 8 in *both* directions, and specifically
+including the eleven frames generated by the gateway's inactivity watchdog and by
+the sleep manager, which are the newest emitters we had never previously seen run. No
+emitter writes the field and nothing in the REST or RPC surface sets it; a
+non-zero value would have to come from hardware or a server build we do not have.
+
+**The GPS coordinate string framing: UNREACHED, and not reachable on this
+hardware.** `packet.GPS` is device→server and this sign has no GPS module, so it
+will never send one. The server-side counterpart is a *command*, not a GPS packet:
+`networkmanager vss/pkg/command/stdcmd.(*GPS).Done` (`0xffada5`) emits
+`CommandID 16` ("set gps") with a 4-byte bool, reachable only through
+`PublicAPI.GPSControl` over `net/rpc` — there is no REST route — and it would not
+produce a type-7 frame. Settling this needs a GPS-equipped device.
+
+### B6. All of packet type 2 (command) is unverified — **ANSWERED: the header is real, two ids are confirmed, and the enum "disagreement" never existed** (2026-10-05)
+
+**Captured.** Eleven type-2 frames, server→device, on port 11113 — nine `status
+request` and two `sleep` — all decoded by `pyvisionect` itself with no
+modification whatsoever:
+
+```
+sleep            04000000 04000000 00000000 8e030000      (16 B)
+                 Type=4   PayloadLength=4  Reserved=0  payload = uint32 LE 910
+status request   0b000000 00000000 00000000               (12 B)
+                 Type=11  PayloadLength=0  Reserved=0  no payload
+```
+
+(The two sleeps were 910 and 907 minutes, `8e030000` and `8b030000`; the nine
+status requests are byte-identical to one another.)
+
+**So the 12-byte `CommandHeader` is real, and `Reserved` *is* emitted.** The param
+packet's struct-vs-wire mismatch does not generalise to type 2. The status-request
+frame proves it on its own: twelve bytes of header and nothing after them. That
+was the single biggest unquantified risk in this library's API, and it is closed.
+
+**The firmware side**, serial console at level 5:
+
+```
+sys evt pv2_command_packet_handler.c:145, Cmd Pend (2)     # sleep
+System command received
+Command sleep received
+Wake after 910 minutes!
+
+sys evt pv2_command_packet_handler.c:90, Cmd Pend (2)      # status request
+System command received
+Command status get received
+sys evt vplatform_system_commands.c:171, Status Send (12)
+```
+
+Both are acked with a type-1 `Control{Flags: 1}` echoing the server's frame id,
+and the status that answers id 11 carries **`ConnectReason == 8`** — confirming
+live the name this library already gave it.
+
+How they were triggered, since neither is reachable out of the box: id 11 by
+adding `"StatusRequester"` to the server's `Config.Features` and setting
+`Global.DeviceStatePolling` to 1 minute while raising the device's own heartbeat
+above it, so the gateway's inactivity watchdog fires; id 4 by adding
+`"SleepManager"` to `Features` and PUTting `Options["SleepSchedule"]` on the
+device. Both config changes were reverted afterwards.
+
+#### `reboot` vs `echo`: **0 is `echo`, 1 is `reboot`**, and the two protocol versions never disagreed
+
+The disagreement was a transcription error in our own notes. Read byte by byte,
+`proto.CommandID.String` (`bin/gateway` `0x8040a0`) and
+`proto/v2/packet.CommandType.String` (`0x8912e0`) load *the same two rodata
+strings in the same order* — `0x182dfdd` `"echo"` for 0, `0x18302ec` `"reboot"`
+for 1 — and so does the whole remainder of both chains. Independently, the
+vendor's only reboot emitter, `networkmanager main.(*Panda).Reboot`
+(`0x1026420`), writes `movabs $0x400000001` into the command struct at
+`0x10265e5`: `Command = 1`, `PayloadLength = 4`, payload = its bool argument.
+
+**This was a live bug, not just a documentation defect.** `CommandType.REBOOT` was
+`0` and `ECHO` was `1`, so `DeviceConnection.reboot()` would have sent `echo`, and
+anyone "just testing with an echo" would have rebooted the sign.
+`allow_command_packets=False` is the only reason it never fired. Fixed, with the
+disassembly cited in the docstring.
+
+#### `allow_command_packets`: leave the default alone, and for a better reason than before
+
+Worth correcting the premise here too: the flag has always defaulted to **`True`**
+(`connection.py:157`) — the library ships the *ability* to refuse type 2, not a
+refusal. `test_command_packets_are_allowed_by_default` pins that on purpose.
+
+So the question is whether to *tighten* it to `False` now, and the answer is no —
+and this capture is the argument. The reason for caution was never the ids; it was
+the **framing**: if type 2 were truncated like the param packet, every command the
+library emitted would have been malformed. That is now measured and correct. What
+remains is per-id semantics, which is a per-call concern and is where the warnings
+belong (`refresh` and `clear_screen` have no emitter at all; `reboot` is a reboot).
+Tightening the default would break every existing caller to express a risk that
+the individual docstrings already express better.
+
+The only change made was the error text: it no longer claims type 2 "has never been
+observed on the wire", because it has.
+
+#### Which values were *not* reached, and why
+
+| ids | why not |
+|---|---|
+| 0 `echo`, 1 `reboot` | no emitter reachable without rebooting the sign, which was out of bounds for this run |
+| 9 `LED window`, 10 `LDRLED`, -1 `refresh`, -2 `clear screen`, -3 `keyboard` | **no emitter anywhere in the suite.** `PublicAPI.SetLEDWindow` sends no packet at all — it only writes `Options["LEDWindow"]` |
+| 2, 3, 5, 8, 16, 18 | no reachable emitter found |
+| 4, 6, 7, 12, 13, 14, 15, 17, 22, -4 | reachable, but only through the one surface below |
+
+Note 15: both `String()` chains print `unknown` for it, but the engine really does
+emit it — `stdcmd.DisplayID.Done` writes `15` (immediate at `0xcfc5c5`) with a
+uint32 panel-type id in 1..10, rejecting anything else as `"invalid display id"`.
+
+#### The one surface that reaches the engine's commands
+
+All of
+`stdcmd.{Sleep,VCOM,SetHeartbeat,System,Battery,DisplayID,Frontlight,FrontlightExt}.Done`,
+plus `beep` (-4) and `touchupdate` (14) built inline, are called from exactly one
+function — `vss/pkg/backend/webkit.generateCommand` — which is served over a
+**unix socket** (`/tmp/visionect-vss/wk-backend.ipc`). There is no TCP, REST or
+RPC route to it. The only external trigger is the **`okular` JavaScript object**
+injected into the page the session renders
+(`vss/extension/visionect-web-extension.so`), and there is no feature gate on the
+path.
+
+So the cheapest next step for more type-2 coverage, if anyone wants it, is
+`okular.TouchUpdate()` (id 14, no arguments, nothing persisted) or
+`okular.Beep(1)` (id **-4** — the only way to see a *negative* command id on the
+wire), run either from the rendered page or from the WebKit inspector
+(`Options["EnableInspector"] = "true"`, then `/inspector/{session-uuid}/`).
+`okular.SetVcom` and `okular.SetDisplayID` write panel parameters; do not.
+
+#### Two operational facts, learned the hard way
+
+* **`SleepSchedule = 0` does not mean "no sleep".** With `"SleepManager"` in
+  `Features` and no `Options["WorkHours"]` on the device, the sleep manager read
+  the `0`, computed "sleep until local midnight" and sent `sleep` with **910
+  minutes**. The sign obeyed in under a second and dropped off the network.
+  `Options["ScheduledWakeup"]` then read `2026-10-06 00:00:00 +0000 UTC`, which is
+  itself wrong: the time is local midnight, mislabelled as UTC.
+* **`app_wakeup` on the USB console wakes it anyway.** Twice, immediately, with a
+  reconnect at `ConnectReason` "wakeup". "Nothing can wake a sleeping device
+  early" is true of the *network* only; the serial console is the escape hatch,
+  and it is the recovery procedure if anyone trips the point above.
+
+Settled in passing: `POST /api/cmd/Status/{uuid}` and
+`POST /api/cmd/StatusInit/{uuid}` both answer
+`rpc error: code = Unknown desc = not implemented` on 8.5.5. `Param` is the only
+working `cmdName`, so there is no direct REST route to a status request — it has
+to come from the watchdog.
 
 ### B7. Which `.pv2` index is the live framebuffer? — **ANSWERED: none of them** (2026-10-05)
 
