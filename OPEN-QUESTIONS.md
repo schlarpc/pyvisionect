@@ -481,14 +481,31 @@ Both stay gated behind `i_really_mean_it`, with the assert sites named in the
 docstring so the next person can make their own call. If someone does try it,
 `sf_list` first is safe and tells you what there is to select.
 
-### A7. `play_music` — OPEN, blocked on a waking human
-"Play built-in song." Unknown what it does. Probably explains the beeping
-reported when no server is reachable -- which is now better explained anyway by
-`E: Max conn errs. Reboot` (see E2), since a sign that power-cycles is also a
-sign that re-runs whatever it plays at boot.
+### A7. `play_music` — ANSWERED, and it kills the USB console
 
-Trivial to settle, but it makes an audible noise in someone's home, so it waits
-until the owner is awake and wants to hear it. Not a technical blocker.
+It plays **the Indiana Jones theme** (confirmed audibly by the owner).
+
+**It also appears to kill `usb_cli_task`**, exactly like `sf_rdid`/`sf_rdst` (A6).
+Observed: the command produced **no echo and no reply at all**, and every
+subsequent command -- `cli_version_get`, `conn_state_get`, `server_tcp_get`, even
+a bare newline -- returned empty. Meanwhile the **device itself stayed perfectly
+healthy**: still connected to Home Assistant, heartbeating on the 60 s cadence,
+pinging normally. That asymmetry (console dead, device alive) is the A6
+signature, and it implies the same consequence: the watchdog logs the task
+timeout, does nothing, then forces a full reset roughly 25 minutes later.
+
+[INFERENCE] The crash is attributed to `play_music` because the console was
+responsive immediately before and dead immediately after, with nothing else
+issued in between. Not re-tested -- deliberately, since reproducing it costs
+another device reboot to learn nothing new.
+
+So `play_music` belongs with `sf_rdid`/`sf_rdst` in the
+**"present, documented, and will crash your console"** set, not in the harmless
+curiosities. It should be gated behind `i_really_mean_it` alongside them.
+
+It does **not** explain the beeping-with-no-server report: that is better
+accounted for by `E: Max conn errs. Reboot` (see E2), where a sign that
+power-cycles also re-runs whatever it plays at boot.
 
 ### A10. Do rectangle (partial) updates actually work on this panel? — **ANSWERED: yes** (2026-10-05)
 

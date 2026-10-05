@@ -71,7 +71,8 @@ is enough to make it respect the right flag:
     Emits information and changes nothing.  Always allowed.
 ``ACTION``
     Changes nothing persistent but *does* something: ``pss`` makes the sign send
-    a status packet, ``play_music`` chirps, ``conn_scan`` scans.  Needs
+    a status packet, ``conn_scan`` scans.  (``play_music`` is *not* harmless --
+    see its entry; it takes the console down with it.)  Needs
     ``allow_writes``.
 ``WRITE``
     An ordinary setter.  RAM-only until ``flash_save``.  Needs ``allow_writes``.
@@ -306,7 +307,11 @@ _ROWS = (
     ('max17135_wakeup', '<i2c_channel>', 'Wakes up MAX17135', 'DESTRUCTIVE'),
     ('pbs', '', 'PV2 send button', 'ACTION'),
     ('pgs', '', 'PV2 send GPS', 'ACTION'),
-    ('play_music', '', 'Play built-in song', 'ACTION'),
+    # Plays the Indiana Jones theme -- and appears to kill usb_cli_task with it,
+    # exactly like sf_rdid/sf_rdst: console dead to everything afterwards while the
+    # device keeps heartbeating normally, then the watchdog resets it ~25 min later.
+    # Verified audibly; the crash is inferred from console-alive-before/dead-after.
+    ('play_music', '', 'Play built-in song (KILLS THE CONSOLE)', 'HARD'),
     ('pss', '', 'PV2 send status', 'ACTION'),
     ('pts', '<x> <y>', 'PV2 send touch', 'WRITE'),
     ('reboot', '', 'Reboot device', 'DESTRUCTIVE'),

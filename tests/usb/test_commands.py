@@ -451,7 +451,16 @@ def test_every_hard_command_needs_the_loud_flag(name: str) -> None:
     assert s.console._require().written == []  # type: ignore[attr-defined]
 
 
-def test_the_hard_tier_is_the_set_the_brief_calls_out() -> None:
+def test_the_hard_tier_is_the_destructive_set_plus_the_console_killers() -> None:
+    """Eight commands that destroy state, plus ``play_music``.
+
+    ``play_music`` is not destructive -- it plays the Indiana Jones theme -- but
+    it takes ``usb_cli_task`` down with it, exactly like ``sf_rdid``/``sf_rdst``:
+    the console goes silent to everything afterwards while the device keeps
+    heartbeating normally, and the watchdog then resets it ~25 min later.  A
+    command that costs a device reboot belongs behind the same explicit flag,
+    whatever its intent.
+    """
     assert HARD_COMMANDS == frozenset(
         {
             "fs_format",
@@ -462,6 +471,7 @@ def test_the_hard_tier_is_the_set_the_brief_calls_out() -> None:
             "cli_password_set",
             "sf_unprot",
             "sf_wrst",
+            "play_music",
         }
     )
 
