@@ -595,6 +595,12 @@ our choice, not the device's.
 
 #### What it actually buys -- bandwidth, not latency
 
+> **Superseded in part.** The wire figures below hold. The "`EpdUpd` is ~2.9 s
+> whatever the area" reading does **not** -- every partial in this run carried
+> `inv: 1` and so paid for a clearing waveform it did not need. With the bit set
+> the way the firmware actually requires (see "The correction" below), a partial
+> draws in ~1.7 s. Read "The payoff, re-measured against the shipped encoder".
+
 Measured from the firmware's own `Profiling:` line:
 
 | push | wire bytes (`Pv2Len`) | raw bytes | `EpdUpd` | total |
@@ -613,11 +619,12 @@ long idle took 7 waveform passes and `UPD_FULL`; everything afterwards, partial
 is **not** "partial vs full rectangle"; it is the device's own periodic clearing
 refresh.
 
-So a clock that changes one digit costs ~300 bytes and ~3.0 s instead of ~78 KB
-and ~3.6 s, plus it saves encoding and LZ4-ing 1.84 MB on the server every tick.
-That is a real win for a battery device on wifi and for a Raspberry Pi doing the
-encoding -- it is **not** the "continuous updates" win we hoped for, because the
-~3 s panel floor is unchanged.
+So a clock that changes one digit costs ~300 bytes instead of ~78 KB, plus it
+saves encoding and LZ4-ing 1.84 MB on the server every tick. That is a real win
+for a battery device on wifi and for a Raspberry Pi doing the encoding -- it is
+still **not** the "continuous updates" win we hoped for, because even the
+~1.7 s a partial really takes is seconds, and the ghosting policy makes you take
+a 2.9-5.3 s full push periodically regardless.
 
 #### What shipped
 
