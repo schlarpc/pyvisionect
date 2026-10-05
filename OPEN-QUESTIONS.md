@@ -88,6 +88,47 @@ notices and does nothing, then forces a reset ~25 min later. They read a
 "Play built-in song." Unknown what it does. Probably explains the reported
 beeping when no server is reachable.
 
+### A10. Do rectangle (partial) updates actually work on this panel? — OPEN
+
+**The claim we have been making is weaker than it sounds.** `getRectangleSupport`
+returns false *unconditionally* for `HardwareNameID == 8` (`client.go:41`), before
+consulting `MergeRegions`, `ForceRectangleSupport`, or the device option. That is
+**the vendor server's policy**, not a demonstrated property of the device. We have
+been writing it as though the hardware cannot do partial updates; what we actually
+know is that the vendor's software never asks it to.
+
+We are the server now, so that policy does not bind us. Nobody has ever sent this
+device a partial rectangle, so nobody knows what it does with one.
+
+**Why it matters.** Every push is currently a full 1440x2560 frame: ~1.8 MB, ~7 s
+on the wire, and a full-panel waveform. If partials work, a clock that changes one
+digit could be a few KB and a local refresh. That is the difference between a
+sign that updates hourly and one that can update continuously.
+
+**Experiment.**
+1. Full-screen baseline push; record `DisplayStateCRC`.
+2. Push an `ImagePacket` carrying a rectangle **smaller than the full screen** --
+   start in *screen* space (a 2880xN strip on one `ScreenID`), since that avoids
+   the interlacer entirely.
+3. Observe three things: does the device **ack or NACK**; does
+   `DisplayStateCRC` change and to what; and does the **panel actually update only
+   that region** (the PTZ webcam can answer this -- see `tmp/visionect/cam/`).
+4. If a screen-space strip works, try a rect that is *not* full width, then work
+   back toward canvas-space rects and see where the interlacing fold breaks it.
+
+**Expected failure modes, in increasing order of interest:** NACK (device refuses,
+claim upheld); accepted but the whole panel redraws (no benefit); accepted and
+garbled (geometry assumption wrong); accepted and correct (the claim was wrong and
+there is a large performance win available).
+
+Recoverable either way -- a full-screen push repairs any garbling.
+
+**Related:** `RectangleUpdateOptions` auto-fills `0x0101`/`0x0102` by encoding;
+`noFullUpdateMax = 10` caps consecutive partials server-side in the vendor stack;
+the interlacer wants exactly 4 rects of 1440x640, which is the *mechanical* reason
+canvas-space partials cannot survive the fold -- but a screen-space rect never
+enters the fold.
+
 ### A8. The panel-boundary dark band — OPEN, partially characterised
 
 A visible artefact at the ScreenID 0 / ScreenID 1 boundary on the 31.2" panel.

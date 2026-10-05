@@ -620,6 +620,8 @@ server's per-display bookkeeping on this device — they shape the internal rect
 and hence which displays are marked dirty — but their output is overridden by the
 full-screen requirement before the packet is built. [D]
 
+> **This is server policy, not a measured device limit.** `getRectangleSupport` returns false *unconditionally* for `HardwareNameID == 8`, so the vendor's software never sends this hardware a partial rectangle. Whether the **device** would accept one has never been tested -- nobody has ever sent it one. See `OPEN-QUESTIONS.md` A10.
+
 **Do not build logic that depends on partial updates landing.** A reimplementation
 targeting this hardware needs only the full-frame path; the region logic matters for other
 Visionect hardware and for matching the vendor's internal checksum bookkeeping exactly.

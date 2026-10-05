@@ -613,7 +613,7 @@ hardcoded literal inside `main.(*grpcHandlers).handleLiveView` — not even a
 {11, 13, 24, 34, 42} and this sign is 8. The file protocol is not entangled with
 image pushes at all.
 
-(Partial updates still never land on this sign, but for an unrelated reason:
+(Partial updates are still never sent to this sign by the vendor server, for an unrelated reason:
 `getRectangleSupport` returns false unconditionally for `HardwareNameID == 8`.)
 
 ### Running without the LZ4 codec

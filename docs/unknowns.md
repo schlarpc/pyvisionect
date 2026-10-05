@@ -31,7 +31,7 @@ analysis or systematic experimentation on hardware will recover them.
 
 `Width * Height` must divide into 16-bit quanta, and the vendor grows the rectangle
 outward — but **not in which order**: right then left? symmetric? height first? It is
-unreachable on `HardwareNameID 8`, where rectangle support is off unconditionally and
+never sent on `HardwareNameID 8`, where the *server* disables rectangle support unconditionally and
 every push is full-screen.
 
 **To settle it:** capture one partial push from a device that does support rectangles.

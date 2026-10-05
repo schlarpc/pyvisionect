@@ -360,7 +360,7 @@ not even a `@screen_%d` format string — inside the handler for a **live-view**
 including the reference device's. The file protocol is not entangled with image pushes at
 all.
 
-Partial updates genuinely never land on this hardware, but for an unrelated reason; see
+Partial updates are never *sent* to this hardware by the vendor server, for an unrelated reason; see
 [imaging.md](imaging.md#region-and-delta-updates-exist-but-are-unreachable-here).
 
 ## Version numbers: three unrelated threes
