@@ -59,15 +59,27 @@ Ghosting
 --------
 E-ink accumulates ghosting under partial updates, and the vendor caps
 consecutive partials at ``noFullUpdateMax = 10`` precisely for that
-(``client.go:217``).  The firmware enforces no such cap of its own -- twelve
-back-to-back partials all drew without a forced refresh -- so the policy is
-ours to keep.  :class:`PartialPolicy` keeps it, defaulting to the vendor's 10,
-and :class:`DirtyTracker` counts for you.  B1 adds the reason the full-screen
-push is the right place to spend it: with the shipped ``RectangleFlags = 0``
-the ``Options`` "normal update" bit is clear, so the firmware runs its
-**inverse clearing waveform** on every full-screen push (``inv: 1`` ->
-``UPD_FULL``).  A tracker that never forces a full refresh never clears, and
-the panel slowly turns to mush.
+(``client.go:217``).  The firmware enforces no such cap of its own, and --
+measured, not assumed -- **it also clears nothing of its own accord**: across
+eight accepted partial pushes and twelve rectangles the console showed
+``wfn: 2, inv: 0`` into one ``UPD_FULL_AREA`` per rectangle, every time, with
+no unrequested ``inv: 1``, no ``Force Inverse`` and no ``UPD_FULL``.  So the
+policy is not a precaution, it is the only thing clearing the panel.
+:class:`PartialPolicy` keeps it, defaulting to the vendor's 10, and
+:class:`DirtyTracker` counts for you.
+
+The full-screen push is where the budget is spent because that is the lever we
+have evidence for: with the shipped ``RectangleFlags = 0`` the ``Options``
+"normal update" bit is clear, which **requests** the inverse clearing waveform
+(B1).  Note *requests*: on this firmware some full pushes with byte-identical
+``inv: 1`` headers logged ``Force Inverse and full area update`` and ran 8
+``UPD_FULL`` passes while others logged nothing and ran 4 ``UPD_FULL_AREA``
+passes, for reasons nobody has pinned down.  That is a reason to keep the
+default conservative rather than to raise it.  A tracker configured never to
+force a full refresh never even asks, and the panel slowly turns to mush.
+
+Nothing here selects a waveform.  ``wfn: 2`` is the only value ever observed on
+this panel and no API is exposed for it.
 
 A partial may not also ask for the clearing waveform
 ---------------------------------------------------
@@ -480,21 +492,33 @@ def encode_screen_rect(
 
 def _apply_to_state(state: np.ndarray, grey: np.ndarray,
                     dirty: Sequence[Rect], panel: Panel, enc: int, dith: int,
-                    *, quant_canvas: Optional[np.ndarray],
+                    *, bayer: Optional[np.ndarray],
+                    blue_noise: Optional[np.ndarray],
                     dither_levels: Optional[int]) -> None:
     """Fold the dirty regions' new pixels into the state image, in place.
 
-    Mirrors :func:`~.encoder.encode_frame`'s own state bookkeeping: for a
-    pixel-local dither the quantisation is phased on the canvas, so a region's
-    pixels are identical whether it is encoded alone or inside a bigger
-    rectangle -- that is what keeps partials from seaming.  Floyd-Steinberg is
-    not pixel-local, so it is run per band-slice on the mirrored tile, the way
-    a full push runs it per display, and a partial *will* seam against its
-    neighbours under it.
+    Mirrors :func:`~.encoder.encode_frame`'s own state bookkeeping, with one
+    deliberate difference that is the whole point of a partial: the dither runs
+    on the **dirty slice only**, not on the canvas.
+
+    For a pixel-local dither that is free.  The threshold matrix is phased on
+    the canvas coordinate, so passing the slice's canvas origin produces byte
+    for byte what quantising the whole canvas and cutting the slice out of it
+    would -- which is also exactly what keeps partials from seaming against
+    their neighbours.  Quantising 300x120 pixels instead of 1440x2560 is where
+    most of the encode-time saving comes from.
+
+    Floyd-Steinberg is **not** pixel-local: the error that reaches a pixel
+    depends on everything above and left of it.  It is run per band-slice on
+    the mirrored tile, the way a full push runs it per display, and a partial
+    *will* differ from a full push's pixels under it.  The partial stays
+    self-consistent -- its state and checksum describe the bytes it sent -- so
+    the device never notices, but neighbouring regions can seam visibly.
     """
     mirror = bool(panel.driver.mirror)  # type: ignore[union-attr]
     band_h = panel.rotated_height
     lane_w = panel.rotated_width
+    pixel_local = _is_pixel_local(dith)
     for rect in dirty:
         for display in range(panel.displays):
             band = Rect(0, display * band_h, lane_w, band_h)
@@ -502,8 +526,11 @@ def _apply_to_state(state: np.ndarray, grey: np.ndarray,
             if part is None:
                 continue
             rows, cols = part.as_slice()
-            if quant_canvas is not None:
-                state[rows, cols] = quant_canvas[rows, cols]
+            if pixel_local:
+                state[rows, cols] = _quantise(
+                    grey[rows, cols], enc, dith, origin=(part.y, part.x),
+                    bayer=bayer, blue_noise=blue_noise, levels=dither_levels,
+                )
                 continue
             tile = grey[rows, cols]
             if mirror:
@@ -712,13 +739,6 @@ def encode_partial_frame(
             return full("too-many-regions")
 
     # ---- new state image, then cut the rectangles out of it -------------
-    pixel_local = _is_pixel_local(dith)
-    quant_canvas: Optional[np.ndarray] = None
-    if pixel_local:
-        quant_canvas = _quantise(
-            grey, enc, dith, origin=(0, 0), bayer=bayer_matrix,
-            blue_noise=blue_noise_matrix, levels=dither_levels,
-        )
     if prev_state.state_grey.shape != panel.canvas_shape:
         raise ValueError(
             f"prev_state's state image is {prev_state.state_grey.shape[1]}x"
@@ -727,7 +747,8 @@ def encode_partial_frame(
         )
     state = prev_state.state_grey.copy()
     _apply_to_state(state, grey, dirty, panel, enc, dith,
-                    quant_canvas=quant_canvas, dither_levels=dither_levels)
+                    bayer=bayer_matrix, blue_noise=blue_noise_matrix,
+                    dither_levels=dither_levels)
 
     # A partial that also requests the inverse clearing waveform is refused by
     # the firmware ("Skip image update: partial image not allowed"), so the

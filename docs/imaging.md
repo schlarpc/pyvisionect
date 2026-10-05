@@ -639,12 +639,15 @@ and hence which displays are marked dirty — but their output is overridden by 
 full-screen requirement before the packet is built. [D]
 
 > **All three are server policy. The device itself accepts partial rectangles.** Verified
-> on the 31.2" sign on 2026-10-05 with our own listener: 15 partial rectangles — a
-> `2880x128` strip, an off-axis `512x160` block, and twelve `256x128` blocks back to back
-> — were all acked, all drawn **only where addressed**, and all echoed back as
-> `DisplayStateCRC` equal to the state checksum we computed. `DisplayUpdateCount`
-> advanced once per partial, no NACK, and no device-side forced full refresh. [W]
-> See `OPEN-QUESTIONS.md` A10 for the full evidence.
+> on the 31.2" sign on 2026-10-05 with our own listener, twice: first with hand-built
+> packets (15 rectangles), then with the shipped `pyvisionect.imaging.partial` encoder
+> (10 pushes, 8 of them partial, on both `ScreenID`s, including a 3-rectangle packet and
+> a rectangle straddling a band seam). Every one was acked, drawn **only where
+> addressed**, and echoed back as `DisplayStateCRC` equal to the state checksum we
+> computed. `DisplayUpdateCount` advances once per partial and the firmware enforces no
+> cap of its own. [W] See `OPEN-QUESTIONS.md` A10 for the full evidence — including the
+> one thing that *is* refused, below: a partial that also asks for the inverse clearing
+> waveform.
 
 ### How a partial has to be addressed on this hardware
 
@@ -666,33 +669,126 @@ A sub-rectangle cut this way is byte-identical to the same window of the full-sc
 `2880 x 640` payload. [W] Note the consequence: **one screen-space rectangle always
 touches two canvas bands**, 640 rows apart. To repaint a single band, fill the partner
 lane with the unchanged pixels from the state image — twice the bytes you strictly need,
-still a rounding error against 1.84 MB, and verified to leave the partner band visually
+still a rounding error against 1.84 MB, and verified on glass to leave the partner band
 untouched. [W]
 
 The firmware echoes the parsed header to the USB console as
 `l: (ScreenID X Y W H), enc: 0x4` followed by `u: (...), wfn: 2`, which makes a partial
 easy to confirm without a camera. [W]
 
+### The alignment rule is already right in screen space
+
+`W*H` must divide the 16-bit quantum (§"The alignment rule is on `W*H`"). On a screen
+rectangle the width is **double** a lane's, and that is exactly what makes the existing
+rule correct rather than an approximation: [D]
+
+| encoding | screen rule | implies per lane | which is what `pack` needs |
+|---|---|---|---|
+| 4 bpp | `w*h % 4 == 0` | `lane_w*h % 2 == 0` | even byte count, no pad |
+| 1 bpp | `w*h % 16 == 0` | `lane_w*h % 8 == 0` | whole bytes, no pad |
+
+So `is_aligned` / `align_to_quantum` need no screen-space variant for the quantum itself.
+What they *do* need on top is the pairing constraint: `x` and `w` must be multiples of
+**8**, one lane group plus its partner's, or the rectangle starts half-way into a group
+and the lanes come out swapped. At 1 bpp an odd height additionally forces `w % 16`,
+which one more 8-pixel growth always supplies.
+
+### A partial may not also ask for the clearing waveform — this one bites
+
+`RectangleHeader.Options` bit `0x0002` **clear** means "inverse update" (§"`ImageHeader`
+and `RectangleHeader`"), and the vendor ships `RectangleFlags = 0`, so the bit is clear by
+default. Send a partial that way and the firmware parses it, echoes the header, and then
+throws it out: [W]
+
+```
+l: (0 1168 160 512 128), enc: 0x4 pde: 0x0, te: 0x0
+u: (0 1168 160 512 128), wfn: 2, dum: 1, inv: 1
+Image download completed (0 0)
+Skip image update: partial image not allowed
+                                     -> NACK, ErrorCode 0x06000000, EpdUpd=0
+```
+
+The same rectangle with bit `0x0002` **set** logs `inv: 0`, acks, and draws in 1723 ms.
+Which is reasonable — an inverse clearing refresh drives the whole panel, so "clear only
+this rectangle" is not something the waveform can express.
+
+So: **partial rectangles must carry the normal-update bit; full-screen ones should not.**
+That is not a conflict, it is the design. The full-screen push is where the clearing
+refresh belongs, and it is what the consecutive-partial budget is spent on.
+
 ### What a partial actually saves
 
-Measured from the firmware's own `Profiling:` line, same sign, 22 °C: [W]
+Measured from the firmware's own `Profiling:` line, same sign, 2026-10-05: [W]
 
-| push | `Pv2Len` (wire) | raw bytes | `EpdUpd` | total |
-|---|---:|---:|---:|---:|
-| full screen, steady state | 77 613 | 1 843 200 | 2 916 ms | 3 637 ms |
-| `2880 x 128` strip | 2 143 | 184 320 | 2 908 ms | 3 039 ms |
-| `256 x 128` block | **292** | 16 384 | 2 904 ms | **2 983 ms** |
+| push | screen rect | `Pv2Len` (wire) | raw bytes | `EpdUpd` | total |
+|---|---|---:|---:|---:|---:|
+| full screen (dense test grid) | 2 x `2880x640` | 144 976 | 1 843 200 | 5 298 ms | 6 287 ms |
+| full screen (typical content) | 2 x `2880x640` | 83 729 | 1 843 200 | 2 916 ms | 3 618 ms |
+| `1232x200` canvas block | `2464x200` | 21 856 | 246 400 | 1 693 ms | 1 860 ms |
+| `256x128` canvas block | `512x128` | 1 590 | 32 768 | 1 723 ms | 1 807 ms |
+| two bands, 3 rects, one packet | 3 rects | 3 355 | 36 800 | 1 819 ms | 1 911 ms |
+| `160x96` canvas block | `320x96` | 402 | 15 360 | 1 719 ms | 1 798 ms |
+| `200x100` canvas block | `400x100` | **342** | 20 000 | 1 690 ms | **1 770 ms** |
 
-**The wire cost collapses; the panel time does not.** `EpdUpd` is ~2.9 s regardless of
-area — the waveform has a floor on this panel. A partial saves bandwidth, server encode
-time and LZ4 work, not refresh latency. The `UPD_FULL` / `UPD_FULL_AREA` distinction in
-the console is the device's own periodic clearing refresh, **not** full-versus-partial:
-the first push after a long idle is `UPD_FULL` with 7 waveform passes, and everything
-after it — partial *and* full-screen — is `UPD_FULL_AREA` with 2–4. [W]
+**The wire cost is the headline: ~245x less for a realistic small change** (342 B against
+83 729 B), and the server also skips dithering, packing, interlacing and LZ4-ing 1.84 MB.
 
-A reimplementation that only ever pushes full frames remains correct and is what this
-library does today; the region logic matters for other Visionect hardware, for matching
-the vendor's internal checksum bookkeeping exactly, and now for the partial path above.
+The panel time moves too, but read it carefully before designing around it. A partial runs
+~1.7 s and a full push 2.9–5.3 s, and most of that gap is **not** area — it is the
+clearing waveform. A partial is forbidden from requesting the inverse update (above), so
+it never pays for one; a full push with the shipped `RectangleFlags = 0` always asks for
+one. Whether it *gets* one is the device's call: in one session, five full pushes with
+byte-identical `inv: 1` headers split three to two between `Force Inverse and full area
+update` → 8x `UPD_FULL` (5.3 s) and no such line → 4x `UPD_FULL_AREA` (2.9 s), with no
+interval or ordering that explains the split. [W] Treat partial updates as a **bandwidth
+and CPU** optimisation; the refresh you save is the clearing refresh you still have to ask
+for periodically anyway, for ghosting.
+
+### The firmware clears nothing on its own — measured
+
+Across eight accepted partial pushes and twelve rectangles, on both `ScreenID`s, the
+console showed `wfn: 2, inv: 0` → exactly one `UPD_FULL_AREA` per rectangle, every time.
+**No partial ever produced an `inv: 1`, a `Force Inverse` line or a `UPD_FULL` that the
+server did not ask for.** [W] So nothing is clearing the panel between full pushes, and
+the consecutive-partial budget is a requirement rather than a precaution. (A ~25-minute
+run does not prove the firmware *never* self-manages, but it removes the hope that it
+will.)
+
+`wfn: 2` is the only waveform number ever observed on this panel, across every capture
+to date. Nothing is known about what selects it, the panel reports a waveform file
+`WF=31.2_C296` that has never been examined, and **the library exposes no
+waveform-selection API** because there is no evidence one exists. [W]
+
+### What the library does with all this
+
+`pyvisionect.imaging.partial` — opt-in, off by default:
+
+```python
+from pyvisionect.imaging import DirtyTracker, PartialPolicy, Dithering
+
+tracker = DirtyTracker(panel=panel, encoding=4, dithering=Dithering.BLUE_NOISE,
+                       policy=PartialPolicy(max_consecutive_partials=10))
+frame = tracker.update(img)        # first call: full screen
+frame = tracker.update(img2)       # then screen-space partials
+if frame.rectangles:
+    conn.send_image(frame)
+```
+
+`encode_frame(..., partial=True)` and `encode_partial_frame(...)` are the stateless forms.
+`encode_frame` with no `partial=` behaves exactly as it always has. The tracker falls back
+to a full-screen push — and says why in `EncodedFrame.fallback_reason` — when there is no
+previous state, when the encoding or dithering changed, when an inverse update is asked
+for, when the dirty region would cost more than half a full push, when there are more
+dirty regions than merging can reduce, when the panel has no screen-space addressing, and
+when the consecutive-partial budget trips.
+
+Rectangles outside `2880 x 640` are **refused, not clamped**: what the firmware does with
+an out-of-bounds rectangle was deliberately never probed. [W]
+
+A reimplementation that only ever pushes full frames remains correct, and that is still
+what `encode_frame` does by default; the region logic matters for other Visionect
+hardware, for matching the vendor's internal checksum bookkeeping exactly, and for the
+partial path above.
 
 Related constants, for completeness: [D]
 
@@ -700,7 +796,7 @@ Related constants, for completeness: [D]
 |---|---|
 | max regions per display before merging is forced | **15** |
 | region-merge defaults | 5% / 10% **of the display diagonal** |
-| max partial updates before a forced full update | **10** |
+| max partial updates before a forced full update | **10** (server policy; the firmware has none) |
 | change-detection threshold | per-pixel absolute grey difference, default 0 (any difference counts) |
 
 ## The state checksum
@@ -815,7 +911,30 @@ From a real push to a live sign: [W]
 | transfer and device ack of the 1.84 MB frame | **~7 s** (a TI CC3100 at 1–3 Mbps; LZ4 buys almost nothing on dithered data) |
 | `DisplayStateCRC` confirmation | only on the **next heartbeat**, ~53 s later |
 
-So the perceived "about a minute" is mostly *confirmation* latency, not draw time. The
-panel draw itself is bounded between the ack and the next heartbeat and was not separately
-measured. [GAP] The serial console narrates display activity, so capturing it across a
-push would pin it.
+So the perceived "about a minute" is mostly *confirmation* latency, not draw time.
+
+The panel draw is no longer a gap: the firmware's `Profiling:` line reports it as
+`EpdUpd`, and watching the serial console across a push gives **~1.7 s for a partial, 2.9 s
+for a full push that does not run the clearing waveform, and 5.3 s for one that does.** [W]
+See "What a partial actually saves" above.
+
+### Encode cost, full versus partial
+
+Same machine, the real captured dashboard canvas (1440 × 2560), one `300 × 120` region
+changed, best of 3: [W]
+
+| dithering | full screen | partial, change-detected | partial, `rects=` given |
+|---|---:|---:|---:|
+| none | 13.9 ms | 9.4 ms | **1.4 ms** |
+| blue-noise | 34.3 ms | 9.3 ms | **1.6 ms** |
+| Floyd-Steinberg | 49.7 ms | 10.4 ms | **2.0 ms** |
+
+Two things make the partial cheap. Ordered dithers are phased on the **canvas**
+coordinate, so quantising the dirty slice with its canvas origin is byte-identical to
+quantising the whole canvas and cutting the slice out — a partial therefore dithers
+`300 × 120` pixels instead of 1440 × 2560. And packing and interlacing scale with the
+rectangle, not the screen.
+
+What is left is change detection, ~8 ms of the ~9 ms, because it runs over the whole
+canvas however small the change. A caller that already knows what it redrew should pass
+`rects=`; that is the 1.4 ms column.

@@ -124,6 +124,11 @@ def _connected_components(mask: np.ndarray) -> list[Rect]:
        ``imaging/`` needs no scipy or OpenCV.
     """
     h, w = mask.shape
+    # One vectorised pass to find which rows have anything at all.  Change
+    # detection runs over the whole canvas on every frame, and on a typical
+    # partial update almost every row is empty, so asking numpy once beats
+    # 2560 per-row ``.any()`` calls.
+    nonempty = mask.any(axis=1)
     parent: list[int] = []
 
     def find(a: int) -> int:
@@ -139,10 +144,10 @@ def _connected_components(mask: np.ndarray) -> list[Rect]:
 
     runs_by_row: list[list[tuple[int, int, int]]] = []  # (x0, x1_exclusive, label)
     for y in range(h):
-        row = mask[y]
-        if not row.any():
+        if not nonempty[y]:
             runs_by_row.append([])
             continue
+        row = mask[y]
         # run starts/ends via edge differences
         d = np.flatnonzero(np.diff(np.concatenate(([0], row.view(np.uint8), [0]))))
         starts, ends = d[0::2], d[1::2]
@@ -198,8 +203,14 @@ def detect_changes(new_grey: np.ndarray, old_grey: np.ndarray,
     b = np.asarray(old_grey, dtype=np.uint8)
     if a.shape != b.shape:
         raise ValueError(f"change detection needs equal shapes, got {a.shape} vs {b.shape}")
-    diff = np.abs(a.astype(np.int16) - b.astype(np.int16))
-    mask = diff > threshold
+    if threshold <= 0:
+        # ``diff > 0`` is just inequality, and skipping the two int16
+        # promotions saves two 3.7 MB temporaries on a full canvas.  This is
+        # the vendor's default and by far the common case.
+        mask = a != b
+    else:
+        diff = np.abs(a.astype(np.int16) - b.astype(np.int16))
+        mask = diff > threshold
     if not mask.any():
         return []
     rects = _connected_components(mask)

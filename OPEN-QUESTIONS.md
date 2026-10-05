@@ -507,7 +507,7 @@ It does **not** explain the beeping-with-no-server report: that is better
 accounted for by `E: Max conn errs. Reboot` (see E2), where a sign that
 power-cycles also re-runs whatever it plays at boot.
 
-### A10. Do rectangle (partial) updates actually work on this panel? — **ANSWERED: yes** (2026-10-05)
+### A10. Do rectangle (partial) updates actually work on this panel? — **ANSWERED: yes, and now SHIPPED** (2026-10-05)
 
 **They work.** The device accepts a rectangle smaller than the screen, acks it,
 draws exactly that rectangle and nothing else, and reports back our state
@@ -619,45 +619,214 @@ That is a real win for a battery device on wifi and for a Raspberry Pi doing the
 encoding -- it is **not** the "continuous updates" win we hoped for, because the
 ~3 s panel floor is unchanged.
 
-#### What it would take to use this in the library
+#### What shipped
 
-1. **`DeviceState.supports_rectangles`** (`session/device.py:106`) returns False
-   for `HardwareNameID 8`. That is a correct statement about the *vendor
-   server's* behaviour and a false one about the device. It needs to become two
-   ideas, not one: "the vendor stack would never send one" and "this device
-   accepts one".
-2. **`Panel.forces_full_screen`** (`imaging/panel.py:248`) promotes every frame
-   to full screen. Verified: `encode_frame(..., rects=[Rect(200,300,400,100)],
-   prev_state=...)` returns `full_screen=True` with the usual 2 x `2880x640`.
-   Patch that property out and the next gate fires --
-   `ValueError: interlacing needs exactly one full-size rectangle per display
-   (got [1, 0, 0, 0])`. Both gates are *about the fold*, and both are correct
-   for a canvas-space rectangle.
-3. **The missing piece is a screen-space encoder**, which never enters the fold:
-   cut the rectangle from the state canvas for both lanes of the target screen
-   (`INTERLACE_PAIRS[2]`), mirror, pack 4 bpp, interleave, emit one `Rectangle`
-   with screen-space `x/y/w/h`. Constraints: `x` and `w` multiples of 8 so each
-   lane row is a whole number of 2-byte interleave groups, and the existing
-   `w*h % 4 == 0` quantum.
-4. **Checksum bookkeeping has to follow the partial.** Apply the rectangle to
-   the state image and re-hash, or the device's echoed `DisplayStateCRC` will
-   not match and the next push costs a redundant full redraw. Every partial
-   above did this and every echo came back equal.
+`pyvisionect.imaging.partial`, plus the primitives underneath it. Opt-in, off by
+default, and `encode_frame` with no `partial=` argument is byte-for-byte what it
+was.
 
-Working code for all of it: `tmp/visionect/agent-a10/a10d_lib.py`
-(`lane_regions`, `screen_rect`).
+```python
+from pyvisionect.imaging import DirtyTracker, PartialPolicy, Dithering
+
+tracker = DirtyTracker(panel=panel, encoding=4, dithering=Dithering.BLUE_NOISE,
+                       policy=PartialPolicy(max_consecutive_partials=10))
+frame = tracker.update(img)       # full screen first, then partials
+if frame.rectangles:
+    conn.send_image(frame)
+```
+
+* **`encode_partial_frame(...)`** — stateless: canvas dirty rects (detected or
+  given) → per band → lane columns → snapped to the 4-px interleave group →
+  screen rects, cut from the *new* state image for **both** lanes, mirrored,
+  packed, interleaved. `encode_frame(..., partial=True)` delegates to it.
+* **`PartialPolicy`** — the ghosting budget (default 10, the vendor's
+  `noFullUpdateMax`) and a cost gate at half a full push.
+* **`DirtyTracker`** — holds the `FrameState` and the consecutive counter, with
+  `rollback()` for a push that did not go out and `reset()` to drop the state.
+* **`interlace.lane_span` / `screen_span` / `lane_of_display` /
+  `displays_of_screen`** — the fold restricted to a sub-range. It restricts
+  cleanly because it is a pure column permutation.
+* **`Panel.screen_width` / `screen_height` / `screens` /
+  `supports_screen_rectangles`**, and bounds checking that **refuses** an
+  out-of-bounds rectangle rather than clamping it.
+* **`DeviceState.accepts_screen_rectangles`**, backed by
+  `SCREEN_RECTANGLE_VERIFIED_HARDWARE`.
+
+`supports_rectangles` was left `False` **on purpose**, and the reasoning is
+worth keeping: it is a correct statement about `getRectangleSupport`, half the
+library's prose cites it as such, and flipping it would make code that merely
+asked for a frame start emitting partials. The contrary evidence is a different
+proposition — "we measured one device taking one" — so it got its own name. The
+new set is a record of an experiment, not a capability a device advertises;
+there is no way to ask a device this, so the only honest way to add an id is to
+point one at a `DirtyTracker` and watch the glass.
+
+The hardware run also settled what A10 had left open:
+
+| was unexercised | now |
+|---|---|
+| only `ScreenID 0` | **both.** `l: (1 1168 80 512 128)` acked and drawn; band 3 and band 2 both reached |
+| one rectangle per packet | **three in one packet**, mixed geometry, all drawn |
+| a rect straddling a band seam | **two rects, one packet**, band-local `y=580` and `y=4` |
+| partner lane held (one offline check) | **verified on glass**: a partial on band 2 whose partner rows land inside an existing black bar on band 3 left the bar perfectly intact |
+| out-of-bounds rectangles | **still unprobed, now unreachable** — the library refuses them |
+
+Ten pushes, ten acks, zero NACKs on the shipped encoder, `ErrorCode 0`
+throughout, and the device's echoed `DisplayStateCRC` equal to our computed
+state checksum on every push that got as far as the next heartbeat.
+
+#### The correction: a partial may not also ask for the clearing waveform
+
+**This cost a NACK to find and it contradicts the first run.** With
+`RectangleHeader.Options` bit `0x0002` *clear* — the shipped default, which B1
+established means "inverse update" — the firmware parses the rectangle, echoes
+the header back, and then refuses it:
+
+```
+l: (0 1168 160 512 128), enc: 0x4 pde: 0x0, te: 0x0
+u: (0 1168 160 512 128), wfn: 2, dum: 1, inv: 1
+Image download completed (0 0)
+Skip image update: partial image not allowed
+                      -> NACK, ErrorCode 0x06000000, EpdUpd=0, ImgId=0x00000000
+```
+
+The identical rectangle with bit `0x0002` **set** logs `inv: 0`, acks, and draws
+in 1723 ms. It is a sensible rule: an inverse clearing refresh drives the whole
+panel, so "clear only this rectangle" is not expressible.
+
+The first A10 run recorded partials being accepted with the bit clear, and its
+own quoted console output shows `inv: 1` on an accepted strip. That is **not
+reproducible** — the same wire shape now gets refused every time. Something
+about the device's state differed; the sign spent the hours in between pointed
+back at VSS for B1, so a parameter or a mode may have changed. Unresolved, and
+not worth another probe: the rule as it stands is unambiguous and the library
+obeys it.
+
+So `encode_partial_frame` sets the bit on every partial rectangle regardless of
+`rect_options`, and leaves `rect_options` untouched on the full-screen fallback
+— which is exactly where the clearing refresh belongs, and is what makes the
+ghosting budget worth spending.
+
+#### The payoff, re-measured against the shipped encoder
+
+| push | screen rect | `Pv2Len` | raw | `EpdUpd` | total |
+|---|---|---:|---:|---:|---:|
+| full screen, dense grid | 2 x `2880x640` | 144 976 | 1 843 200 | 5 298 ms | 6 287 ms |
+| full screen, typical content | 2 x `2880x640` | 83 729 | 1 843 200 | 2 916 ms | 3 618 ms |
+| `1232x200` canvas block | `2464x200` | 21 856 | 246 400 | 1 693 ms | 1 860 ms |
+| `256x128` canvas block | `512x128` | 1 590 | 32 768 | 1 723 ms | 1 807 ms |
+| 3 rects, two bands | 3 rects | 3 355 | 36 800 | 1 819 ms | 1 911 ms |
+| `200x100` canvas block | `400x100` | **342** | 20 000 | 1 690 ms | **1 770 ms** |
+
+**~245x on the wire** for a realistic small change, which is the number to design
+to. Encode cost falls as well, measured offline on the real captured dashboard
+canvas with a `300x120` change: a full blue-noise encode is 34.3 ms, the
+change-detected partial 9.3 ms, and the partial with `rects=` supplied
+**1.6 ms**. Ordered dithers are phased on the canvas coordinate, so the partial
+quantises its dirty slice with that slice's origin and gets byte-identical
+pixels while touching 1/100th of the canvas; what remains is change detection,
+which runs over the whole canvas whatever the change. The panel time moves as well — ~1.7 s partial against 2.9–5.3 s full — but
+A10's original "flat ~2.9 s regardless of area" reading needs a correction too:
+most of that gap is the **clearing waveform**, not the area. A partial is
+forbidden from requesting one, a full push with `RectangleFlags = 0` always
+does. `UPD_FULL` (7 passes, 5.3 s) versus `UPD_FULL_AREA` (2–4 passes, 2.9 s) on
+a full push is the device's own periodic decision and was seen going both ways in
+one session with identical `inv: 1` headers. Still: do not sell this as faster
+refreshes. The refresh a partial skips is the clearing refresh you have to take
+periodically anyway.
+
+#### The ghosting policy, fired on hardware
+
+`PartialPolicy(max_consecutive_partials=6)` for the test. Pushes 1–6 after the
+baseline went out as partials, the counter reaching 6; push 7 came back
+`FULL (ghosting-refresh-due)`, `n=2`, `2880x640` each, the console logged
+`inv: 1` on both rectangles, and the counter reset to 0. The default is the
+vendor's 10. Note the firmware enforces no cap of its own — twelve back-to-back
+partials drew fine in the first run — so this is entirely our policy, and a
+tracker configured never to refresh will slowly turn the panel to mush.
+
+The cost gate fired on hardware too: pushing a whole new image through
+`tracker.update()` came back `FULL (not-worth-it)` rather than as a pile of
+rectangles covering the screen twice over.
+
+#### What the waveform console said, push by push — including a clean negative
+
+The serial console was watched for `wfn:` / `inv:` / `UPD_*` on every push of the
+validation run, specifically to see whether the firmware ever clears ghosting on
+its own initiative. Correlated per push:
+
+| time | push | `wfn` | `inv` | `Force Inverse` line | resulting updates |
+|---|---|---|---|---|---|
+| 10:37 | full, 2 rects | 2 | 1 | **yes** | 8x `UPD_FULL` |
+| 10:42 | full, 2 rects | 2 | 1 | **yes** | 8x `UPD_FULL` |
+| 10:43 | partial, 1 rect | 2 | 0 | no | 1x `UPD_FULL_AREA` |
+| 10:46 | full, 2 rects | 2 | 1 | **yes** | 8x `UPD_FULL` |
+| 10:47 | partial, 1 | 2 | 0 | no | 1x `UPD_FULL_AREA` |
+| 10:49 | partial, 1 (screen 1) | 2 | 0 | no | 1x `UPD_FULL_AREA` |
+| 10:51 | partial, **3 rects** | 2 | 0 | no | 3x `UPD_FULL_AREA` |
+| 10:52 | partial, 2 (seam) | 2 | 0 | no | 2x `UPD_FULL_AREA` |
+| 10:54 | partial, 1 | 2 | 0 | no | 1x `UPD_FULL_AREA` |
+| 10:54 | partial, 1 | 2 | 0 | no | 1x `UPD_FULL_AREA` |
+| 10:56 | full (forced by policy) | 2 | 1 | **no** | 4x `UPD_FULL_AREA` |
+| 10:58 | partial, 1 | 2 | 0 | no | 1x `UPD_FULL_AREA` |
+| 11:00 | partial, 1 | 2 | 0 | no | 1x `UPD_FULL_AREA` |
+| 11:02 | full | 2 | 1 | **no** | 4x `UPD_FULL_AREA` |
+
+**The clean negative, which is the point: no partial ever produced an `inv: 1`,
+a `Force Inverse` line or a `UPD_FULL` that we did not ask for.** Eight accepted
+partial pushes, twelve rectangles, both `ScreenID`s: every one `inv: 0` →
+exactly one `UPD_FULL_AREA` per rectangle. The firmware initiated **no**
+clearing refresh of its own across the run. So the forced-full policy is
+**necessary, not precautionary** — nothing else is going to clear the panel. It
+does not prove the firmware never self-manages (the run is ~25 minutes), but it
+removes "the firmware probably handles it" as a reason to skip the policy.
+
+**And a new one, unexplained: `inv: 1` is a request the firmware sometimes
+declines.** Three full-screen pushes carried byte-identical headers with the bit
+clear, and the console parsed `inv: 1` on all of them — but only the first three
+emitted `Force Inverse and full area update` and ran `UPD_FULL` (8 passes,
+5298 ms). The last two logged no such line and ran `UPD_FULL_AREA` (4 passes,
+2916 ms). `ImgOpt` tracks the split (`0x00003024` when granted, `0x00001124`
+when not) but the bits beyond `0x0002` are not decoded and nothing is inferred
+from them here.
+
+Interval does not explain it: 10:46 was granted 4 minutes after 10:42, and 10:56
+was declined 10 minutes after 10:46. A10's first run saw the same shape and read
+it as "the first push after a long idle" — that does not fit either, since 10:42
+and 10:46 were both minutes after the previous push. **Recorded as unexplained.**
+What it means for us is worth stating plainly: a forced full-screen push
+*requests* the clearing refresh and does not guarantee one, so the conservative
+default (10) earns its keep, and anyone who raises it is betting on a lever that
+is only sometimes pulled.
+
+`wfn: 2` on all 23 lines this session — partial and full, both screens, 4 bpp.
+It remains the **only** waveform number ever observed on this panel, nothing is
+known about what selects it, and **no waveform-selection API is exposed**; the
+panel reports a waveform file `WF=31.2_C296`, so a table exists that we have
+never touched.
 
 #### Still unknown
 
 * **Out-of-bounds rectangles were deliberately not probed** (`y+h > 640`,
   `x+w > 2880`). Whether the firmware clamps, refuses, or writes past its
-  framebuffer is unmeasured, and poking a memory-safety edge on a kitchen sign
-  was not worth it. Clamp server-side until someone tests it.
-* Only `ScreenID 0` was exercised on hardware. Screen 1 is the same code path
-  with the lane swap (displays 3, 2) and was checked offline, not on glass.
-* Only one rectangle per packet was sent; `NrPrimitives > 1` with mixed
-  geometry is untested.
-* Ghosting over hundreds of partials is not characterised -- 12 was clean.
+  framebuffer is unmeasured. The library now validates against the panel bounds
+  and raises rather than sending, so this stays closed by construction.
+* **Why the first run's partials were accepted with `inv: 1`.** See above.
+* **Ghosting over hundreds of partials is not characterised.** Twelve were clean
+  in the first run, eight in the second; the policy exists because nobody has
+  run the long experiment.
+* **Why the firmware grants `Force Inverse` on some full pushes and not others.**
+  See the table above. Until that is understood, "force a full screen" should be
+  read as "ask for a clearing refresh", not "get one".
+* **Waveform selection.** `wfn: 2` is the only value ever seen, across every
+  capture. Whether the server can select another, and what the panel's
+  `WF=31.2_C296` table holds, is completely unexplored. No API for it.
+* **Interlacing mode 1** (hardware revision 1.0.0) has no lane map, so
+  `supports_screen_rectangles` is False for it and both paths refuse. B3.
+* **Floyd-Steinberg partials seam.** The dither is not pixel-local, so a partial
+  re-dithers only its own band slice and its pixels differ from a full push's.
+  The partial stays self-consistent, which is all the device checks. Ordered and
+  blue-noise dithers are phased on the canvas and do not seam.
 
 ### A11. `display_out_of_sync` false-alarms on every push — **FIXED** (2026-10-05)
 

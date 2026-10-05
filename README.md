@@ -716,8 +716,9 @@ hardcoded literal inside `main.(*grpcHandlers).handleLiveView` — not even a
 {11, 13, 24, 34, 42} and this sign is 8. The file protocol is not entangled with
 image pushes at all.
 
-(Partial updates are still never sent to this sign by the vendor server, for an unrelated reason:
-`getRectangleSupport` returns false unconditionally for `HardwareNameID == 8`.)
+(Partial updates are still never sent to this sign by the *vendor* server, for an unrelated
+reason: `getRectangleSupport` returns false unconditionally for `HardwareNameID == 8`. This
+library can send them anyway — see "Screen-space partial updates" above.)
 
 ### Running without the LZ4 codec
 
@@ -811,11 +812,63 @@ this hardware**: `getRectangleSupport` returns false unconditionally for
 told us what it is.
 
 That is server policy, not a panel limit. The 31.2" sign **does** accept partial
-rectangles — measured 2026-10-05, 15 of them acked and drawn only where addressed. What
-it cannot take is a rectangle in *canvas* coordinates, which would have to survive the
-interlaced fold; one addressed in *screen* coordinates bypasses the fold. This library
-has no screen-space encoder yet, so for now: do not build logic that depends on partial
-updates landing. See `OPEN-QUESTIONS.md` A10.
+rectangles. What it cannot take is a rectangle in *canvas* coordinates, which would have
+to survive the interlaced fold; one addressed in *screen* coordinates bypasses the fold.
+`DeviceState.accepts_screen_rectangles` is the other half of the idea — False and True
+respectively for this sign — and `pyvisionect.imaging.partial` is the encoder.
+
+### Screen-space partial updates — opt-in, one device, not vendor-sanctioned
+
+```python
+from pyvisionect.imaging import DirtyTracker, PartialPolicy, Dithering
+
+tracker = DirtyTracker(panel=conn.state.panel, encoding=4,
+                       dithering=Dithering.BLUE_NOISE,
+                       policy=PartialPolicy(max_consecutive_partials=10))
+
+frame = tracker.update(img)          # first frame: a full screen
+frame = tracker.update(img2)         # after that: only what changed
+if frame.rectangles:                 # empty means the panel already shows this
+    conn.send_image(frame)
+```
+
+Everything is still a pure function of the tracker's state plus the image — no clock, no
+I/O — and it is still **CPU-bound**, so keep it off the event loop. It is a good deal
+cheaper than a full push, though: on the real 1440 × 2560 dashboard canvas with a
+`300 × 120` change, 9 ms against 34 ms for a full blue-noise encode, and **1.6 ms** if you
+pass `rects=` because you already know what you redrew. `encode_frame(...,
+partial=True)` and `encode_partial_frame(...)` are the stateless forms;
+`encode_frame` without `partial=` behaves exactly as it always has.
+
+A realistic small change — a `200x100` canvas block — costs **342 bytes on the wire
+against 83 729 for a full push**, measured from the firmware's own profiling line. The
+2x in there is unavoidable: one screen rectangle always covers two canvas bands, because
+they are interleaved 4 pixels at a time, so a partial carries the partner band's
+unchanged pixels alongside the changed ones. Do not read this as faster refreshes — the
+panel still spends ~1.7 s on a partial and 2.9–5.3 s on a full one, and the policy makes
+you take a full one periodically.
+
+That periodic full push is the point, not an overhead: with the shipped
+`RectangleFlags = 0` a full-screen update *asks for* the panel's inverse clearing
+waveform, and e-ink under nothing but partial updates accumulates ghosting. Measured:
+across eight partial pushes the firmware never once initiated a clearing refresh of its
+own, so the policy is doing real work. It also does not always get what it asks for — the
+device grants the clearing waveform on some full pushes and not others, for reasons we
+have not pinned down — which is why `PartialPolicy` defaults to the vendor's conservative
+`noFullUpdateMax = 10` rather than something larger.
+
+The tracker falls back to a full push — and tells you why in
+`EncodedFrame.fallback_reason` — when there is no previous state, when the encoding or
+dithering changed, when an inverse update is requested, when the dirty area would cost
+more than half a full push, when there are more dirty regions than merging can reduce,
+when the panel has no screen-space addressing, and when the ghosting budget trips. If a
+push *fails*, call `tracker.rollback()`: the tracker's state image is a claim about what
+the glass shows, and a failed push makes it a lie.
+
+Verified by hand on one device — `HardwareNameID 8`, the 31.2" Place&Play 32, firmware
+7.4.4407, hardware 1.1.0. The vendor's server never sends this hardware a partial, so
+there is no vendor behaviour to match and no vendor support if it misbehaves. See
+`OPEN-QUESTIONS.md` A10 and `docs/imaging.md`.
 
 ## What is deliberately out of scope
 
