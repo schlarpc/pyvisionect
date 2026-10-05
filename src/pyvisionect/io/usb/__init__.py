@@ -28,8 +28,9 @@ Layout
 ================================================  =============================
 :mod:`~pyvisionect.io.usb.console`                the transport: frames, prompt
                                                   sync, async-log separation
-:mod:`~pyvisionect.io.usb.commands`               the 111 commands this firmware
-                                                  has, and the 96 it does not
+:mod:`~pyvisionect.io.usb.commands`               the 112 commands this firmware
+                                                  has, the 111 ``help`` admits
+                                                  to, and the 95 unlisted ones
 :mod:`~pyvisionect.io.usb.parsers`                one dataclass per getter
 :mod:`~pyvisionect.io.usb.device`                 :class:`Sign` -- the typed
                                                   surface, with write gating
@@ -96,6 +97,8 @@ from __future__ import annotations
 
 from .commands import (
     ABSENT_FROM_7_4_4407,
+    HIDDEN_IN_7_4_4407,
+    LISTED_BY_HELP,
     ASSERTS_AND_KILLS_CLI,
     COMMANDS,
     DESTRUCTIVE_COMMANDS,
@@ -153,6 +156,8 @@ from .provisioning import (
 
 __all__ = [
     "ABSENT_FROM_7_4_4407",
+    "HIDDEN_IN_7_4_4407",
+    "LISTED_BY_HELP",
     "ASSERTS_AND_KILLS_CLI",
     "BAUD_RATE",
     "COMMANDS",

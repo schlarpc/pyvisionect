@@ -3,27 +3,32 @@
 Why this table exists
 ---------------------
 
-The vendor's CLI reference documents **160** commands.  Firmware 7.4.4407 on a
-32" system board answers **111** of them.  Commands are compiled in behind
-switches (``USE_CC3100_DRIVER``, ``USE_RS9113_DRIVER``, ``USE_MMA7660_DRIVER``,
-``USE_VPLATFORM_SCPU_EXT``, ...), so ``help`` on the device in front of you is
-the only authority, and the delta is not small: 96 documented commands are
-missing and 47 undocumented ones are present.
+The vendor's CLI reference documents **160** commands.  ``help`` on firmware
+7.4.4407 on a 32" system board prints **111** of them, and the firmware is known
+to answer **112**: ``wifi_ssid_set`` is present but unlisted.  Commands are
+compiled in behind switches (``USE_CC3100_DRIVER``, ``USE_RS9113_DRIVER``,
+``USE_MMA7660_DRIVER``, ``USE_VPLATFORM_SCPU_EXT``, ...), so the device in front
+of you is the only authority -- but ``help`` is not a complete index of it, which
+is the single most important thing on this page.  The delta is not small: 95
+documented commands are unlisted and 47 undocumented ones are printed.
 
-Two gaps matter enough to call out:
+Two findings matter enough to call out:
 
-* **``wifi_ssid_set`` does not exist on this firmware.**  The vendor reference
-  documents it, and the documented way to set an SSID containing a space is to
-  use it instead of the whitespace-delimited ``wifi_conf_set``.  That escape
-  hatch is not available here: the only commands are
-  ``wifi_conf_set <ssid> <psk> <security> <band>``, ``wifi_psk_set <psk>`` and
-  ``wifi_security_set <security>``.  See
-  :func:`pyvisionect.io.usb.provisioning.plan_wifi` for what that costs.
-* **``flash_print`` does not exist on this firmware**, although the reverse
-  engineering notes call it "the single highest-value command" for dumping
-  every stored setting.  There is no single-command settings dump here; the
-  per-area getters are the whole story, which is why
-  :meth:`pyvisionect.io.usb.device.Sign.dump` walks them.
+* **``help`` hides at least one command.**  ``wifi_ssid_set`` is documented by
+  the vendor, is not printed by ``help``, and yet answers ``E: Invalid
+  argument(s)`` to a bare call -- which a missing command does not; it answers
+  ``Command '...' not recognised.``  So it exists.  It is the documented way to
+  set an SSID containing a space, and it takes the SSID alone, with no PSK.
+  Whether the console's parser will actually carry a space through it is a
+  separate, **unverified** question -- see ``A2`` in ``OPEN-QUESTIONS.md`` and
+  :func:`pyvisionect.io.usb.provisioning.plan_wifi`.
+* **``flash_print`` is not listed**, although the reverse engineering notes call
+  it "the single highest-value command" for dumping every stored setting.  There
+  is no *known* single-command settings dump here; the per-area getters are the
+  whole story, which is why :meth:`pyvisionect.io.usb.device.Sign.dump` walks
+  them.  Note this one has not been probed the way ``wifi_ssid_set`` was: it is
+  nullary in the vendor reference, and a bare call to a nullary command executes
+  it rather than failing, so the existence oracle is unsafe here.
 
 The delta is recorded as data, in :data:`ABSENT_FROM_7_4_4407` and
 :data:`UNDOCUMENTED_IN_7_4_4407`, so it stays checkable rather than becoming a
@@ -455,14 +460,12 @@ ABSENT_FROM_7_4_4407: frozenset[str] = frozenset(_ABSENT)
    argument, because argument validation then rejects the call before anything
    happens. A bare call to a *nullary* command (``fs_format``, ``scpu_reset``,
    ``cc3100_format``, ``scpu_upgrade``) would **execute** it.
-"""
-"""The 96 documented commands this firmware does not have.
 
-Mostly whole hardware families that were not compiled in: every ``scpu_*``
-(sensor/front-light co-processor), ``touch_*`` calibration, ``t2s_*``
-text-to-speech, ``frontlight_*``, ``heater_*``, ``mobile_*``, ``rs911x_*``
-(the other radio), ``sim5320_*`` (cellular).  Plus four one-offs worth knowing
-about: ``wifi_ssid_set``, ``flash_print``, ``fw_checksum_get`` and
+The 95 entries are mostly whole hardware families that were not compiled in:
+every ``scpu_*`` (sensor/front-light co-processor), ``touch_*`` calibration,
+``t2s_*`` text-to-speech, ``frontlight_*``, ``heater_*``, ``mobile_*``,
+``rs911x_*`` (the other radio), ``sim5320_*`` (cellular).  Plus three one-offs
+worth knowing about: ``flash_print``, ``fw_checksum_get`` and
 ``accelerometer_conf_get``/``_set``.
 """
 
@@ -567,6 +570,7 @@ TCLV_FOR: dict[str, tuple[int, ...]] = {
     "wifi_mac_conf_set": (110,),
     "wifi_psk_set": (67,),
     "wifi_security_set": (66,),
+    "wifi_ssid_set": (65,),
 }
 """TCLV ids each command touches, in argument order where there are several.
 
@@ -575,6 +579,10 @@ Only the unambiguous ones.  ``wifi_conf_set <ssid> <psk> <security> <band>`` is
 argument order is SSID, password, security, band while the ids run SSID,
 security, password, band.  Getting that backwards writes the PSK into the
 security field.
+
+``wifi_ssid_set`` is in here too, even though ``help`` never mentions it: TCLV
+65 is the id it writes, and :data:`pyvisionect.devices.tclv.USB_HINTS` has named
+it as the setter for 65 all along.
 
 Cross-reference :mod:`pyvisionect.devices.tclv`: every id here is in that table,
 and :data:`~pyvisionect.devices.tclv.NETWORK_READ_ONLY` says which of them the

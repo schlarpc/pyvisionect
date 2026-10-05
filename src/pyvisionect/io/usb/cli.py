@@ -17,6 +17,8 @@ from collections.abc import Sequence
 
 from .commands import (
     ABSENT_FROM_7_4_4407,
+    HIDDEN_IN_7_4_4407,
+    LISTED_BY_HELP,
     COMMANDS,
     DOCUMENTED_COUNT,
     UNDOCUMENTED_IN_7_4_4407,
@@ -146,16 +148,26 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.cmd == "commands" and not args.port:
         print(
-            f"{len(COMMANDS)} commands in firmware 7.4.4407; "
+            f"{len(COMMANDS)} commands known to exist in firmware 7.4.4407, of "
+            f"which {len(LISTED_BY_HELP)} are listed by help; "
             f"{DOCUMENTED_COUNT} documented by the vendor."
         )
-        print(f"  {len(ABSENT_FROM_7_4_4407)} documented but absent here")
+        print(
+            f"  {len(HIDDEN_IN_7_4_4407)} present but hidden from help "
+            f"({', '.join(sorted(HIDDEN_IN_7_4_4407))})"
+        )
+        print(
+            f"  {len(ABSENT_FROM_7_4_4407)} documented but not listed here "
+            f"(unprobed: help is not a complete index, so some may be hidden too)"
+        )
         print(f"  {len(UNDOCUMENTED_IN_7_4_4407)} present but undocumented")
         print()
         for name, entry in sorted(COMMANDS.items()):
             flags = [entry.kind.value]
             if not entry.documented:
                 flags.append("UNDOCUMENTED")
+            if name in HIDDEN_IN_7_4_4407:
+                flags.append("HIDDEN")
             if entry.asserts:
                 flags.append(f"ASSERTS@{entry.asserts}")
             print(f"{entry.syntax:<58} [{','.join(flags)}]")

@@ -299,7 +299,7 @@ ones you would need:
 | 2 | Connectivity type | `conn_type_set <type>` |
 | 18 | Server IP | `server_tcp_set <ip\|dns> <port>` |
 | 19 | Server port | `server_tcp_set <ip\|dns> <port>` |
-| 65 | WiFi SSID | `wifi_ssid_set <ssid>` |
+| 65 | WiFi SSID | `wifi_ssid_set <ssid>` (hidden from `help`, but present) |
 | 66 | WiFi security mode | `wifi_security_set <none\|wpa2\|wpa2e>` |
 | 67 | WiFi password | `wifi_psk_set <psk>` |
 | 68 | WiFi band | `wifi_conf_set` arg 4 |
@@ -334,7 +334,7 @@ this section was measured on a live 32" sign running firmware **7.4.4407**.
 pyvisionect-usb ports                 # find candidate ports
 pyvisionect-usb identify /dev/ttyUSB0 # confirm it is a sign (2 read-only commands)
 pyvisionect-usb dump /dev/ttyUSB0     # read every readable setting
-pyvisionect-usb commands              # the 111 commands this firmware has
+pyvisionect-usb commands              # the 112 commands this firmware answers
 
 # Provisioning prints the plan and exits. --execute to actually do it.
 pyvisionect-usb provision /dev/ttyUSB0 \
@@ -379,20 +379,29 @@ plan.execute(Sign(console, allow_destructive=True))
 configuration are by default retained only in the working RAM."* Which cuts both
 ways: until it runs, a power-cycle undoes everything.
 
-#### The firmware has 111 of the 160 documented commands
+#### `help` lists 111 of the 160 documented commands — and the firmware has 112
 
-`help` on the device is the only authority — commands are compiled in behind
-switches. The delta is in `pyvisionect.io.usb.commands` as data
-(`ABSENT_FROM_7_4_4407`, `UNDOCUMENTED_IN_7_4_4407`), and two gaps change
-documented advice:
+Commands are compiled in behind switches, so the device in front of you is the
+only authority — but **`help` is not a complete index of it.** `wifi_ssid_set`
+is documented by the vendor, is not printed by `help`, and still answers: a bare
+call returns `E: Invalid argument(s)`, where a command the firmware really lacks
+returns `Command '<x>' not recognised.` So there is a third category, *hidden*,
+and the delta is three sets in `pyvisionect.io.usb.commands` rather than two:
+`LISTED_BY_HELP` (111), `HIDDEN_IN_7_4_4407` (1) and `ABSENT_FROM_7_4_4407`
+(95, meaning **unlisted** — only one of them has ever been probed).
 
-- **`wifi_ssid_set` does not exist.** It is the vendor's documented workaround
-  for an SSID containing a space, and without it there is **no way to set such
-  an SSID over USB on this firmware** — `wifi_conf_set` and `wifi_psk_set` share
-  the same whitespace-delimited parser. `plan_wifi` refuses up front and says so
-  rather than letting the device store a truncated SSID.
-- **`flash_print` does not exist**, so there is no one-shot settings dump.
-  `Sign.dump()` walks the per-area getters instead.
+Two findings change documented advice:
+
+- **`wifi_ssid_set` is hidden, not missing.** It is the vendor's documented
+  workaround for an SSID containing a space, it takes the SSID alone with no
+  PSK, and this firmware has it. Whether the console's parser carries a space
+  through it is still untested on the device, so `plan_wifi` keeps refusing a
+  spaced SSID — but it now says the route exists and is unverified rather than
+  claiming it is impossible.
+- **`flash_print` is not listed**, so there is no *known* one-shot settings
+  dump. `Sign.dump()` walks the per-area getters instead. It is nullary, and a
+  bare call to a nullary command executes it, so the existence probe that
+  settled `wifi_ssid_set` is not safe to run here.
 
 Going the other way, 47 present commands are undocumented, including all three
 `encryption_*` commands, the whole `fs_*` family and the four `vlog_*` log-level

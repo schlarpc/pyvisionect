@@ -35,15 +35,24 @@ power-cycling, and ``flash_save`` is the point of no return.  That is why
 ``flash_save`` sits in the ``DESTRUCTIVE`` tier alongside the setters it
 commits, rather than being treated as a harmless bookkeeping call.
 
-Commands this firmware does not have
+Commands this firmware does not list
 ------------------------------------
 
 :meth:`Sign.refresh_commands` reads ``help`` and remembers the result, after
-which an accessor for a missing command raises
+which an accessor for a command ``help`` did not mention raises
 :class:`~pyvisionect.io.usb.errors.CommandNotInFirmware` locally, without
-writing anything.  Worth doing once per session: 96 of the 160 documented
-commands are absent from 7.4.4407, including ``wifi_ssid_set`` and
-``flash_print``.
+writing anything.  Worth doing once per session: ``help`` on 7.4.4407 lists 111
+of the 160 documented commands, so 95 of them are unlisted, ``flash_print``
+among them.
+
+That gate is deliberately built on ``help`` alone, and ``help`` is not a
+complete index: ``wifi_ssid_set`` is present and working on 7.4.4407 and is
+still not in the listing (see
+:data:`pyvisionect.io.usb.commands.HIDDEN_IN_7_4_4407`).  So a *hidden* command
+is refused locally after a refresh even though it would work.  That is the
+conservative choice -- on firmware this library has not seen, ``help`` is the
+only evidence available -- and ``_run(..., check=False)`` is the escape hatch:
+it sends the line and lets the device be the one that says no.
 '''
 
 from __future__ import annotations
@@ -494,32 +503,48 @@ class Sign:
         Note the argument order is SSID, **password**, security, band, while the
         TCLV ids run SSID, security, password: ``(65, 67, 66, 68)``.
 
-        **An SSID or PSK containing whitespace cannot be set on this firmware.**
-        The vendor documents ``wifi_ssid_set`` as the escape hatch for exactly
-        that case, and firmware 7.4.4407 does not have it -- the command list is
-        ``wifi_conf_set``, ``wifi_psk_set`` and ``wifi_security_set``, none of
-        which can carry a space through a whitespace-delimited parser.  This
-        method refuses rather than silently truncating, and
+        **This method will not send an SSID or PSK containing whitespace.**
+        ``wifi_conf_set`` is one whitespace-delimited line, so a space in either
+        value lands in the wrong field.  The vendor documents ``wifi_ssid_set``
+        as the escape hatch for the SSID case and firmware 7.4.4407 *does* have
+        it -- hidden from ``help``, but present (see
+        :data:`pyvisionect.io.usb.commands.HIDDEN_IN_7_4_4407`).  Whether its
+        parser carries a space through is **untested on the device**
+        (``OPEN-QUESTIONS.md`` A2), so this method refuses rather than
+        truncating someone's SSID on a guess, and
         :func:`pyvisionect.io.usb.provisioning.plan_wifi` says the same thing
         before anything is sent.
 
         Raises:
             ValueError: if *ssid* or *psk* contains whitespace.
         '''
-        for label, value in (("ssid", ssid), ("psk", psk)):
-            if any(c.isspace() for c in value):
-                raise ValueError(
-                    f"{label} contains whitespace, which the single-line "
-                    f"whitespace-delimited CLI cannot carry. The documented "
-                    f"workaround is wifi_ssid_set, which firmware 7.4.4407 does "
-                    f"not have -- so on this firmware such an {label} cannot be "
-                    f"set over USB at all. Rename the network, or point the sign "
-                    f"at a new server by DNS instead."
-                )
+        if any(c.isspace() for c in ssid):
+            raise ValueError(
+                "ssid contains whitespace, and wifi_conf_set is one "
+                "whitespace-delimited line, so the space would land in the "
+                "psk field. wifi_ssid_set takes the SSID alone and firmware "
+                "7.4.4407 does have it -- it is hidden from help, not missing "
+                "-- but whether its parser carries a space through is "
+                "untested, so this will not guess. Rename the network, probe "
+                "wifi_ssid_set by hand first, or move the sign by re-pointing "
+                "the DNS name it already holds."
+            )
+        if any(c.isspace() for c in psk):
+            raise ValueError(
+                "psk contains whitespace, which the single-line "
+                "whitespace-delimited CLI cannot carry. wifi_psk_set has the "
+                "same parser and there is no documented alternative for the "
+                "passphrase, so this one really does look unreachable over USB."
+            )
         return self._run(f"wifi_conf_set {ssid} {psk} {security} {band}")
 
     def set_wifi_psk(self, psk: str) -> CommandResult:
-        """``wifi_psk_set <psk>`` -- TCLV 67. Whitespace is still impossible."""
+        """``wifi_psk_set <psk>`` -- TCLV 67. Whitespace is still unreachable.
+
+        Unlike the SSID, the passphrase has no hidden single-argument setter to
+        fall back on: ``wifi_psk_set`` *is* the single-argument setter and it
+        shares the whitespace-delimited parser.
+        """
         if any(c.isspace() for c in psk):
             raise ValueError("a PSK containing whitespace cannot be sent over this CLI")
         return self._run(f"wifi_psk_set {psk}")

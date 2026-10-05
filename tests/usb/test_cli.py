@@ -43,12 +43,28 @@ def test_provision_requires_a_psk_with_an_ssid() -> None:
 
 
 def test_commands_reports_the_delta(capsys: pytest.CaptureFixture[str]) -> None:
+    """Both counts, kept apart: 112 exist, 111 are listed, 160 are documented."""
     assert main(["commands"]) == 0
     out = capsys.readouterr().out
-    assert "111 commands in firmware 7.4.4407" in out
+    assert "112 commands known to exist in firmware 7.4.4407" in out
+    assert "111 are listed by help" in out
     assert "160 documented" in out
-    assert "96 documented but absent" in out
+    assert "1 present but hidden from help (wifi_ssid_set)" in out
+    assert "95 documented but not listed here" in out
+    assert "help is not a complete index" in out, (
+        "the one sentence that stops a reader treating the 95 as proven absent"
+    )
     assert "47 present but undocumented" in out
+
+
+def test_commands_flags_the_hidden_one_in_the_listing(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    main(["commands"])
+    out = capsys.readouterr().out
+    line = next(l for l in out.splitlines() if l.startswith("wifi_ssid_set "))
+    assert "HIDDEN" in line
+    assert "DESTRUCTIVE" in line
 
 
 def test_commands_flags_the_asserting_ones(capsys: pytest.CaptureFixture[str]) -> None:

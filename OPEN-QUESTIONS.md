@@ -41,6 +41,10 @@ forms of a name with a space and an apostrophe, read back, restore. Answers
 whether the console tokenises on whitespace or takes the rest of the line, and
 decides whether `provisioning.py` can honestly claim arbitrary SSIDs.
 
+Until then `plan_wifi` and `Sign.set_wifi` still refuse a spaced SSID, but the
+refusal now says the route exists and is untested rather than claiming it is
+impossible. Settling this is a one-line change to `plan_wifi`.
+
 ### A3. `vlog_unify_levels` — which end of the scale is quiet? — OPEN
 `0` could mean "emit nothing" or "emit everything"; nothing observed
 distinguishes them, and the help line ("Reset ... to default") contradicts its

@@ -145,18 +145,44 @@ def test_every_step_is_a_command_this_firmware_has() -> None:
     assert all(step.in_firmware for step in plan.steps)
 
 
-# ---------------------------------------------- what this firmware cannot do
+# -------------------------------------------- whitespace in the credentials
 
 
 def test_an_ssid_with_a_space_is_refused_with_the_reason() -> None:
-    """``wifi_ssid_set`` -- the documented workaround -- is not in this firmware."""
-    with pytest.raises(ValueError, match="wifi_ssid_set"):
+    """And the reason is now "unverified", not "the command is missing".
+
+    ``wifi_ssid_set`` *is* in this firmware -- hidden from ``help``, not absent
+    -- and it takes the SSID alone. What nobody has established is whether the
+    console's parser hands it a spaced SSID or just the first token
+    (``OPEN-QUESTIONS.md`` A2), so no plan is emitted for it.
+    """
+    with pytest.raises(ValueError, match="wifi_ssid_set") as excinfo:
         plan_wifi("My Home WiFi", "psk")
+    message = str(excinfo.value)
+    assert "unverified" in message
+    assert "hidden from help, not missing" in message
+    assert "absent" not in message, "it is not absent; that was the old claim"
+
+
+def test_the_ssid_refusal_does_not_claim_a_spaced_ssid_is_impossible() -> None:
+    """The route exists and is untested. Those are different things, and the
+    message has to leave the reader able to go and settle A2."""
+    with pytest.raises(ValueError) as excinfo:
+        plan_wifi("My Home WiFi", "psk")
+    message = str(excinfo.value)
+    assert "no way" not in message
+    assert "cannot be set" not in message
+    assert "probe wifi_ssid_set by hand" in message
 
 
 def test_a_psk_with_a_space_is_refused_too() -> None:
-    with pytest.raises(ValueError, match="whitespace"):
+    """The PSK has no hidden escape hatch: ``wifi_psk_set`` is already it."""
+    with pytest.raises(ValueError, match="whitespace") as excinfo:
         plan_wifi("ExampleAP", "pass word")
+    message = str(excinfo.value)
+    assert "no single-argument escape hatch" in message
+    assert "wifi_psk_set is that command" in message
+    assert "wifi_ssid_set" not in message, "that escape hatch is the SSID's, not the PSK's"
 
 
 def test_the_refusal_points_at_the_dns_alternative() -> None:
@@ -170,18 +196,28 @@ def test_bootstrap_refuses_a_spaced_ssid_before_building_anything() -> None:
 
 
 def test_the_typed_setter_refuses_the_same_way() -> None:
-    with pytest.raises(ValueError, match="firmware 7.4.4407 does not have"):
+    with pytest.raises(ValueError, match="hidden from help, not missing"):
         sign(allow_destructive=True).set_wifi("My SSID", "psk")
 
 
 def test_a_plan_naming_a_missing_command_reports_it_rather_than_half_running() -> None:
+    """The example is an invented name, on purpose.
+
+    It used to be ``wifi_ssid_set``, which turned out to exist. Anything drawn
+    from :data:`ABSENT_FROM_7_4_4407` could go the same way -- that set is
+    "unlisted by ``help``", and ``help`` is not a complete index -- so this test
+    uses a name no firmware will ever have and stops depending on the contents
+    of that set at all.
+    """
     bad = Plan(
         name="hypothetical",
         steps=(
-            type(plan_repoint("h").steps[0])("wifi_ssid_set Foo", "documented, absent"),
+            type(plan_repoint("h").steps[0])(
+                "definitely_not_a_command Foo", "invented, so certainly missing"
+            ),
         ),
     )
-    assert bad.unavailable == ("wifi_ssid_set",)
+    assert bad.unavailable == ("definitely_not_a_command",)
     s = sign(allow_destructive=True)
     s.refresh_commands()
     with pytest.raises(RuntimeError, match="half-provisioned"):

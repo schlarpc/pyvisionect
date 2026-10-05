@@ -1,8 +1,15 @@
-"""The command table, the gating, and the 111-vs-160 delta.
+"""The command table, the gating, and the 112-vs-111-vs-160 delta.
 
 The delta assertions are the interesting ones.  They are what stops the table
 quietly becoming a copy of the vendor's documentation, which is what it would be
 if nobody had plugged a sign in.
+
+Three numbers, and keeping them apart is the point: the vendor documents **160**
+commands, this firmware's ``help`` prints **111**, and the firmware is known to
+answer **112** -- ``wifi_ssid_set`` is present and simply never listed.  So
+``help`` is not a complete index of the firmware, and a test that reads "absent
+from ``help``" as "absent from the firmware" is asserting something the device
+has already disproved.
 """
 
 from __future__ import annotations
@@ -13,6 +20,8 @@ from pyvisionect.io.usb import (
     ABSENT_FROM_7_4_4407,
     ASSERTS_AND_KILLS_CLI,
     COMMANDS,
+    HIDDEN_IN_7_4_4407,
+    LISTED_BY_HELP,
     DESTRUCTIVE_COMMANDS,
     DOCUMENTED_COUNT,
     HARD_COMMANDS,
@@ -46,8 +55,10 @@ def sign(**kwargs: object) -> Sign:
 # ------------------------------------------------------------------- the delta
 
 
-def test_this_firmware_has_111_of_the_160_documented_commands() -> None:
-    assert len(COMMANDS) == 111
+def test_this_firmware_answers_112_commands_and_help_lists_111_of_the_160() -> None:
+    """The two counts are different numbers and mean different things."""
+    assert len(COMMANDS) == 112, "known to exist, help-listed plus hidden"
+    assert len(LISTED_BY_HELP) == 111, "what help actually prints"
     assert DOCUMENTED_COUNT == 160
 
 
@@ -56,14 +67,58 @@ def test_the_table_matches_the_devices_own_help_output() -> None:
 
     This is the test that keeps the built-in table honest: it is derived from a
     capture, and so is the fixture, so a hand edit to either shows up here.
+
+    The comparison is against :data:`LISTED_BY_HELP`, **not** :data:`COMMANDS`.
+    The capture is one ``help`` frame, and ``help`` does not print every command
+    the firmware has, so the hidden ones are legitimately missing from it.
     """
     names = sign().refresh_commands()
-    assert names == frozenset(COMMANDS)
+    assert names == LISTED_BY_HELP, (
+        "this compares a captured `help` frame against the set of commands help "
+        "is expected to print. It is LISTED_BY_HELP and not COMMANDS because "
+        "COMMANDS also carries the hidden commands -- present on the device, "
+        "never printed by help -- which cannot appear in a help capture. A "
+        "difference here means either the capture or the table was hand-edited."
+    )
+    assert frozenset(COMMANDS) - names == HIDDEN_IN_7_4_4407, (
+        "everything in the table that help did not print must be accounted for "
+        "as hidden, not quietly dropped"
+    )
 
 
-def test_96_documented_commands_are_absent_and_none_of_them_is_in_the_table() -> None:
-    assert len(ABSENT_FROM_7_4_4407) == 96
+def test_95_documented_commands_are_unlisted_and_none_of_them_is_in_the_table() -> None:
+    """"Unlisted", not "absent" -- ``wifi_ssid_set`` is why that distinction exists."""
+    assert len(ABSENT_FROM_7_4_4407) == 95
     assert ABSENT_FROM_7_4_4407.isdisjoint(COMMANDS)
+    assert ABSENT_FROM_7_4_4407.isdisjoint(LISTED_BY_HELP)
+
+
+def test_the_hidden_set_bridges_the_table_and_what_help_prints() -> None:
+    """The invariants that keep "exists" and "is listed" from merging again.
+
+    ``wifi_ssid_set`` is in the table *and* missing from ``help``, so it has to
+    be somewhere; if it were nowhere, one of the three sets would be lying.
+    """
+    assert HIDDEN_IN_7_4_4407 <= frozenset(COMMANDS), (
+        "hidden means hidden-but-present, so it must be in the table"
+    )
+    assert HIDDEN_IN_7_4_4407.isdisjoint(ABSENT_FROM_7_4_4407), (
+        "a command cannot be both proven present and recorded as unlisted-absent"
+    )
+    assert LISTED_BY_HELP | HIDDEN_IN_7_4_4407 == frozenset(COMMANDS), (
+        "every known command is either printed by help or hidden; no third state"
+    )
+    assert LISTED_BY_HELP.isdisjoint(HIDDEN_IN_7_4_4407)
+
+
+def test_wifi_ssid_set_is_the_only_hidden_command_found_so_far() -> None:
+    """Found so far. The other 95 unlisted commands have not been probed.
+
+    Pinned deliberately: if a probing run (``OPEN-QUESTIONS.md`` A1) finds more,
+    this test is the thing that has to be updated, which is a prompt to update
+    the counts above with it.
+    """
+    assert HIDDEN_IN_7_4_4407 == frozenset({"wifi_ssid_set"})
 
 
 def test_47_present_commands_are_undocumented() -> None:
@@ -72,10 +127,15 @@ def test_47_present_commands_are_undocumented() -> None:
     assert all(not COMMANDS[name].documented for name in UNDOCUMENTED_IN_7_4_4407)
 
 
+# These are documented by the vendor and not printed by this firmware's `help`.
+# That is *all* that is asserted. None of them has been probed by bare
+# invocation, so "not in help" does not license the claim "not in the firmware"
+# -- `wifi_ssid_set` was in this list until the device said otherwise. Several
+# of these are nullary (`flash_print`, `fw_checksum_get`, `scpu_version`), where
+# the bare-invocation oracle is unsafe because the command would simply run.
 @pytest.mark.parametrize(
     "name",
     [
-        "wifi_ssid_set",
         "flash_print",
         "fw_checksum_get",
         "accelerometer_conf_get",
@@ -89,24 +149,65 @@ def test_47_present_commands_are_undocumented() -> None:
         "sim5320_rssi",
     ],
 )
-def test_notable_documented_commands_this_firmware_lacks(name: str) -> None:
-    """Whole hardware families, plus four one-offs that break documented advice."""
+def test_notable_documented_commands_this_firmware_does_not_list(name: str) -> None:
+    """Whole hardware families, plus the one-offs that break documented advice.
+
+    Unverified: absent from ``help``, which no longer implies absent from the
+    firmware. See the comment above the cases.
+    """
     assert name in ABSENT_FROM_7_4_4407
     assert name not in HELP_TEXT
 
 
-def test_wifi_ssid_set_is_absent_which_breaks_the_documented_workaround() -> None:
-    """The vendor's answer for an SSID with a space is a command that is not here.
+def test_wifi_ssid_set_is_hidden_from_help_but_present() -> None:
+    """The vendor's answer for a spaced SSID is here after all -- just not listed.
 
-    So on this firmware there is no way to set such an SSID over USB at all.
+    Verified on the device: a bare ``wifi_ssid_set`` answers ``E: Invalid
+    argument(s)``, which is argument validation rejecting the call, whereas a
+    command the firmware does not have answers ``Command '<x>' not recognised.``
+    So the command exists and runs.
+
+    Why it matters: it takes the **SSID alone**, with no PSK, where
+    ``wifi_conf_set`` takes four whitespace-separated arguments. That makes it
+    the only candidate route to an SSID containing a space, and it needs no
+    credentials to try. Whether the console's parser actually hands it a spaced
+    SSID is still unverified -- ``OPEN-QUESTIONS.md`` A2 -- so this test claims
+    the command's existence and its arity, and nothing about spaces working.
     """
-    assert "wifi_ssid_set" in ABSENT_FROM_7_4_4407
-    assert "wifi_psk_set" in COMMANDS, "the PSK setter does exist"
+    assert "wifi_ssid_set" in COMMANDS, "present on 7.4.4407"
+    assert "wifi_ssid_set" in HIDDEN_IN_7_4_4407
+    assert "wifi_ssid_set" not in ABSENT_FROM_7_4_4407
+    assert "wifi_ssid_set" not in LISTED_BY_HELP
+    assert "wifi_ssid_set" not in HELP_TEXT, "the capture is help, and help omits it"
+
+    entry = COMMANDS["wifi_ssid_set"]
+    assert entry.arity == 1, "the SSID alone -- no PSK, so it needs no credentials"
+    assert entry.syntax == "wifi_ssid_set <ssid>"
+    assert entry.documented is True, "the vendor's reference does list it"
+    assert entry.kind is Kind.DESTRUCTIVE, "it rewrites TCLV 65 on a live radio"
+
     assert "wifi_conf_set" in COMMANDS
+    assert COMMANDS["wifi_conf_set"].arity == 4, "which is why a space breaks it"
+    assert "wifi_psk_set" in COMMANDS, "the PSK setter does exist too"
 
 
-def test_flash_print_is_absent_so_there_is_no_one_shot_settings_dump() -> None:
+def test_wifi_ssid_set_is_the_usb_setter_for_tclv_65() -> None:
+    """TCLV 65 is network-read-only, so a USB setter for it is the whole point."""
+    assert TCLV_FOR["wifi_ssid_set"] == (65,)
+    assert TCLV_FOR["wifi_conf_set"][0] == 65
+
+
+def test_flash_print_is_unlisted_so_there_is_no_known_one_shot_settings_dump() -> None:
+    """Unlisted, and unlike ``wifi_ssid_set`` it cannot be cheaply probed.
+
+    The vendor lists it as nullary, and the bare-invocation existence oracle is
+    unsafe for a nullary command: the call would execute rather than be rejected
+    for bad arguments. So this stays "not listed", and
+    :meth:`Sign.dump` keeps walking the per-area getters.
+    """
     assert "flash_print" in ABSENT_FROM_7_4_4407
+    assert "flash_print" not in COMMANDS
+    assert "flash_print" not in HIDDEN_IN_7_4_4407, "never probed, so not claimed"
 
 
 @pytest.mark.parametrize(
@@ -361,6 +462,22 @@ def test_a_missing_command_is_refused_locally_once_help_has_been_read() -> None:
     assert "flash_print" not in "".join(
         s.console._require().written  # type: ignore[attr-defined]
     )
+
+
+def test_a_hidden_command_is_still_refused_after_a_refresh() -> None:
+    """Known limitation, pinned so it is a decision and not a surprise.
+
+    The local gate is built on ``help`` alone, because on firmware this library
+    has not seen ``help`` is the only evidence there is. ``wifi_ssid_set`` is
+    the case where that is too conservative: we know it works. ``check=False``
+    is the escape hatch, and the device is then the one that answers.
+    """
+    s = sign(allow_destructive=True)
+    s.refresh_commands()
+    assert "wifi_ssid_set" in COMMANDS, "the table knows it exists"
+    assert s.has("wifi_ssid_set") is False, "but help did not say so"
+    with pytest.raises(CommandNotInFirmware, match="wifi_ssid_set"):
+        s._run("wifi_ssid_set Foo")
 
 
 def test_check_false_sends_it_anyway() -> None:

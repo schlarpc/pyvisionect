@@ -29,16 +29,26 @@ name at your own listener moves the sign with zero commands and zero risk.
 the first thing someone about to run a bootstrap should consider and the last
 thing they will think of.
 
-What firmware 7.4.4407 cannot do
---------------------------------
+Whitespace in an SSID or passphrase
+-----------------------------------
 
-**An SSID or passphrase containing whitespace cannot be set over USB.**  The CLI
-is whitespace-delimited and single-line; the vendor's documented workaround is
-``wifi_ssid_set``, and this firmware does not have that command (see
-:data:`pyvisionect.io.usb.commands.ABSENT_FROM_7_4_4407`).  ``wifi_psk_set``
-exists but has the same parser.  :func:`plan_wifi` refuses up front with that
-explanation rather than letting the device silently store a truncated SSID,
-which is the failure that costs an afternoon.
+**These plans will not set an SSID or passphrase containing whitespace.**  The
+CLI is whitespace-delimited and single-line, so a space in ``wifi_conf_set
+<ssid> <psk> <security> <band>`` shifts every later argument into the wrong
+field.
+
+The vendor's documented workaround is ``wifi_ssid_set``, which takes the SSID
+alone and needs no PSK.  Firmware 7.4.4407 **does have it** -- it is hidden from
+``help``, not missing (see
+:data:`pyvisionect.io.usb.commands.HIDDEN_IN_7_4_4407`).  What is *not* known is
+whether the console's parser hands that command the rest of the line or just the
+first token; nobody has tried a spaced SSID on the device, which is item ``A2``
+in ``OPEN-QUESTIONS.md``.  So :func:`plan_wifi` still refuses up front, and now
+says why: emitting ``wifi_ssid_set My Home WiFi`` would be shipping a plan whose
+outcome we would be guessing at, and a truncated SSID drops the sign off the
+network -- recoverable only over USB.  Settle A2 first and this becomes a
+one-line change.  ``wifi_psk_set`` has no such escape hatch at all: it is
+already the single-argument setter, with the same parser.
 '''
 
 from __future__ import annotations
@@ -106,7 +116,14 @@ class Step:
 
     @property
     def in_firmware(self) -> bool:
-        """Whether firmware 7.4.4407 has this command. See the module docstring."""
+        """Whether 7.4.4407 is known to have this command.
+
+        Checked against :data:`~pyvisionect.io.usb.commands.COMMANDS`, which is
+        every command known to exist -- including the ones ``help`` does not
+        print.  False therefore means "not in the table", which is weaker than
+        "not in the firmware": see
+        :data:`~pyvisionect.io.usb.commands.HIDDEN_IN_7_4_4407`.
+        """
         return self.name in COMMANDS
 
 
@@ -228,25 +245,38 @@ def plan_wifi(
 
     Raises:
         ValueError: if *ssid* or *psk* contains whitespace, or *security* is not
-            a known value. See the module docstring: there is no way to set a
-            whitespace-containing SSID on firmware 7.4.4407, because the one
-            command that could (``wifi_ssid_set``) is not in it.
+            a known value. See the module docstring: ``wifi_ssid_set`` could
+            carry a spaced SSID and firmware 7.4.4407 does have it, but whether
+            its parser accepts the space is unverified, so this refuses rather
+            than guesses.
     """
     if security not in WifiSecurity.ALL:
         raise ValueError(
             f"security must be one of {WifiSecurity.ALL}, got {security!r}; "
             "these are ASCII strings, not integers"
         )
-    for label, value in (("ssid", ssid), ("psk", psk)):
-        if any(c.isspace() for c in value):
-            raise ValueError(
-                f"{label} contains whitespace. The CLI is single-line and "
-                f"whitespace-delimited, and the command the vendor documents for "
-                f"this case -- wifi_ssid_set -- is absent from firmware 7.4.4407. "
-                f"There is no way to set such an {label} over USB on this "
-                f"firmware: rename the network, or leave WiFi alone and move the "
-                f"sign by re-pointing the DNS name it already holds."
-            )
+    if any(c.isspace() for c in ssid):
+        raise ValueError(
+            "ssid contains whitespace. wifi_conf_set is single-line and "
+            "whitespace-delimited, so the space would shift the psk, security "
+            "and band arguments along by one. The command the vendor documents "
+            "for this case -- wifi_ssid_set -- is present on firmware 7.4.4407 "
+            "after all (hidden from help, not missing), and it takes the SSID "
+            "alone with no PSK, but whether its parser carries the space "
+            "through is unverified on the device, so no plan is emitted for it: "
+            "rename the network, probe wifi_ssid_set by hand first, or leave "
+            "WiFi alone and move the sign by re-pointing the DNS name it "
+            "already holds."
+        )
+    if any(c.isspace() for c in psk):
+        raise ValueError(
+            "psk contains whitespace. The CLI is single-line and "
+            "whitespace-delimited, and unlike the SSID there is no "
+            "single-argument escape hatch: wifi_psk_set is that command "
+            "already, and it shares the parser. Rename the network, or leave "
+            "WiFi alone and move the sign by re-pointing the DNS name it "
+            "already holds."
+        )
     return Plan(
         name="wifi",
         steps=(

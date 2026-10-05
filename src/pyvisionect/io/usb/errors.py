@@ -66,9 +66,12 @@ class UnknownCommand(ConsoleError):
         Command 'xyz' not recognised.  Enter 'help' to view a list of available commands.
 
     The documented command set is a superset of any one firmware's: commands are
-    guarded by compile-time switches.  Firmware 7.4.4407 on a 32" board has 111
-    of the 160 documented commands.  See
-    :data:`pyvisionect.io.usb.commands.ABSENT_FROM_7_4_4407`.
+    guarded by compile-time switches.  ``help`` on firmware 7.4.4407 on a 32"
+    board lists 111 of the 160 documented commands.  See
+    :data:`pyvisionect.io.usb.commands.ABSENT_FROM_7_4_4407` -- and note that
+    membership there means "not listed", not "not there": this error is the only
+    reply that *proves* a command is missing, which is why
+    :data:`pyvisionect.io.usb.commands.HIDDEN_IN_7_4_4407` exists.
     """
 
     def __init__(self, command: str) -> None:
