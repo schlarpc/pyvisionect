@@ -23,13 +23,82 @@ produces nothing is normal and must not evict the device's state.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 from ..devices.panels import Panel, panel_for
 from ..packets.status import StatusPacket
 from .pending import PendingWork
 
-__all__ = ["DeviceState", "DeviceStateStore", "RECTANGLE_UNSUPPORTED_HARDWARE"]
+__all__ = [
+    "CONVERGENCE_CONTACTS",
+    "DEFAULT_CONTACT_INTERVAL",
+    "DRAW_ALLOWANCE",
+    "DeviceState",
+    "DeviceStateStore",
+    "RECTANGLE_UNSUPPORTED_HARDWARE",
+    "SyncStatus",
+]
+
+
+class SyncStatus(str, Enum):
+    """What :attr:`DeviceState.in_sync` means *right now*, with the clock.
+
+    :attr:`DeviceState.in_sync` is a correct tri-state and a bad alarm.  A push
+    legitimately leaves the device disagreeing with us for the whole of its
+    draw-and-report cycle -- measured at 48 s on the 31.2" sign with a
+    one-minute heartbeat -- so "checksums differ" raised immediately is a
+    problem indicator after **every normal update**.
+
+    This enum splits ``in_sync is False`` into the two cases that actually
+    differ:
+
+    * :attr:`CONVERGING` -- they differ, and the device has not yet had a fair
+      chance to tell us otherwise.  Expected, transient, not a problem.
+    * :attr:`DIVERGED` -- they differ, and it has had its chance.  The panel is
+      showing something other than what we sent.
+
+    "Had its chance" is :meth:`DeviceState.sync_status`; see there.
+    """
+
+    UNKNOWN = "unknown"
+    """Never pushed, or the device has not reported a ``DisplayStateCRC``."""
+
+    IN_SYNC = "in_sync"
+    """The device echoes the checksum of our last push."""
+
+    CONVERGING = "converging"
+    """Mismatched, but still inside the window the device is allowed."""
+
+    DIVERGED = "diverged"
+    """Mismatched after the device has had its say. A real problem."""
+
+
+CONVERGENCE_CONTACTS = 2
+"""Status packets that must arrive after a push before a mismatch counts.
+
+**Two, not one.**  One is tempting and wrong: a push that lands a second before
+a scheduled heartbeat is acked but not yet *drawn*, so the very next status
+still carries the old ``DisplayStateCRC``.  The second contact is the first one
+that is unambiguously after the draw.  Measured on the 31.2" sign: ack at
+6.5 s, new checksum echoed at 48 s, heartbeat interval 60 s -- so contact #1
+carried it that time, and would not have if the push had been 15 s later.
+"""
+
+DRAW_ALLOWANCE = 60.0
+"""Seconds added to the time-based backstop for transfer plus panel draw.
+
+A full-screen push is ~1.84 MB to a CC3100 (acked at 3-7 s) and the panel
+itself needs ~3 s of waveform.  60 s is an order of magnitude of headroom, and
+the contact counter is the criterion that normally fires first.
+"""
+
+DEFAULT_CONTACT_INTERVAL = 60.0
+"""Seconds assumed between contacts when the device has not announced one.
+
+``NextStatus`` (status tag 27) is in minutes and is present on this hardware,
+so this is only reached before the first status of a fresh install.
+"""
 
 RECTANGLE_UNSUPPORTED_HARDWARE: frozenset[int] = frozenset({8})
 """``HardwareNameID`` values for which the server's ``getRectangleSupport``
@@ -71,6 +140,24 @@ class DeviceState:
     imaging_state: Any = None
     pushed_checksum: int | None = None
     connections: int = 0
+    pushes: int = 0
+    """How many image packets we have queued for this device."""
+    statuses_seen: int = 0
+    """How many status packets this device has sent us, ever."""
+    statuses_at_push: int | None = None
+    """:attr:`statuses_seen` as it stood when the last push was queued.
+
+    The difference is :attr:`contacts_since_push`, which is the whole of "has
+    the device had a chance to report?" expressed without a clock.
+    """
+    last_push_at: float | None = None
+    """Caller-supplied clock value of the last push, or None.
+
+    Deliberately **not** persisted: it is whatever clock the caller passed
+    (``time.monotonic`` for the bundled listener), and a monotonic value means
+    nothing after a restart.  A restored state therefore falls back to the
+    contact counter alone, which is the safe direction.
+    """
     options: dict[str, str] = field(default_factory=dict)
     """Server-side, string-keyed device options.
 
@@ -164,8 +251,122 @@ class DeviceState:
             return None
         return reported == self.pushed_checksum
 
+    @property
+    def contacts_since_push(self) -> int:
+        """Status packets received since the last push was queued.
+
+        ``0`` when nothing has been pushed, so a fresh device never looks like
+        it has failed to converge.
+        """
+        if self.statuses_at_push is None:
+            return 0
+        return max(0, self.statuses_seen - self.statuses_at_push)
+
+    @property
+    def expected_contact_interval(self) -> float | None:
+        """Seconds until the device said it would next be in touch.
+
+        ``NextStatus`` (status tag 27) in **minutes**, converted. ``None``
+        before the first status packet.  This is the device's own announcement
+        and is what "a chance to report" has to be measured against: a sign on
+        a one-hour heartbeat is not broken for the 59 minutes it is away.
+        """
+        if self.last_status is None:
+            return None
+        minutes = self.last_status.next_status_minutes
+        if not minutes:
+            return None
+        return float(minutes) * 60.0
+
+    def convergence_grace(
+        self,
+        *,
+        contacts: int = CONVERGENCE_CONTACTS,
+        interval: float | None = None,
+    ) -> float:
+        """Seconds a push is allowed before a mismatch is called a problem.
+
+        ``contacts * interval + DRAW_ALLOWANCE``, where *interval* defaults to
+        :attr:`expected_contact_interval` and then to
+        :data:`DEFAULT_CONTACT_INTERVAL`.  It scales with the device's own
+        announced schedule rather than being a flat timeout, which is the
+        difference between "wait for the sign" and "wait long enough that the
+        alarm is useless".
+        """
+        if interval is None:
+            interval = self.expected_contact_interval
+        if not interval or interval <= 0:
+            interval = DEFAULT_CONTACT_INTERVAL
+        return contacts * interval + DRAW_ALLOWANCE
+
+    def convergence_deadline(
+        self,
+        *,
+        contacts: int = CONVERGENCE_CONTACTS,
+        interval: float | None = None,
+    ) -> float | None:
+        """Clock value past which a mismatch counts, or None if unknown."""
+        if self.last_push_at is None:
+            return None
+        return self.last_push_at + self.convergence_grace(
+            contacts=contacts, interval=interval
+        )
+
+    def sync_status(
+        self,
+        now: float | None = None,
+        *,
+        contacts: int = CONVERGENCE_CONTACTS,
+        interval: float | None = None,
+    ) -> "SyncStatus":
+        """:attr:`in_sync`, but with "it has not answered yet" split out.
+
+        The rule has two halves and they fail in opposite directions, so it is
+        an **or**:
+
+        * the device has been in touch :data:`CONVERGENCE_CONTACTS` times since
+          the push and still disagrees -- it has had its say;
+        * more than :meth:`convergence_grace` seconds have passed -- it has
+          stopped saying anything, and a silent sign is not an excuse for a
+          stale panel.
+
+        The counter is the one that normally fires, and it needs no clock.  The
+        deadline is the backstop for a device that simply stopped calling, and
+        it is skipped when *now* is not given or the push predates a restart.
+
+        Args:
+            now: a clock value on the same scale as the one passed to
+                :meth:`DeviceConnection.send_image`.  Omit it to use the
+                contact counter alone.
+            contacts: how many contacts count as "had its say".
+            interval: override the device's announced contact interval, in
+                seconds.
+        """
+        state = self.in_sync
+        if state is None:
+            return SyncStatus.UNKNOWN
+        if state:
+            return SyncStatus.IN_SYNC
+        if self.contacts_since_push >= contacts:
+            return SyncStatus.DIVERGED
+        deadline = self.convergence_deadline(contacts=contacts, interval=interval)
+        if now is not None and deadline is not None and now >= deadline:
+            return SyncStatus.DIVERGED
+        return SyncStatus.CONVERGING
+
+    def note_push(self, checksum: int, *, now: float | None = None) -> None:
+        """Record that *checksum* was put on the wire.
+
+        Called for you by :meth:`DeviceConnection.send_image_packet`.
+        """
+        self.pushed_checksum = checksum
+        self.pushes += 1
+        self.statuses_at_push = self.statuses_seen
+        self.last_push_at = now
+
     def apply_status(self, status: StatusPacket) -> None:
         self.last_status = status
+        self.statuses_seen += 1
 
     # ------------------------------------------------------- persistence
 
@@ -185,6 +386,9 @@ class DeviceState:
             "device_id": self.device_id.hex(),
             "pushed_checksum": self.pushed_checksum,
             "connections": self.connections,
+            "pushes": self.pushes,
+            "statuses_seen": self.statuses_seen,
+            "statuses_at_push": self.statuses_at_push,
             "options": dict(self.options),
             "pending": self.pending.to_dict(),
             "last_status": (
@@ -222,6 +426,13 @@ class DeviceState:
             pending=PendingWork.from_dict(raw["pending"]) if raw.get("pending") else PendingWork(),
             pushed_checksum=raw.get("pushed_checksum"),
             connections=int(raw.get("connections", 0)),
+            pushes=int(raw.get("pushes", 0)),
+            statuses_seen=int(raw.get("statuses_seen", 0)),
+            statuses_at_push=(
+                None
+                if raw.get("statuses_at_push") is None
+                else int(raw["statuses_at_push"])
+            ),
             options=dict(raw.get("options") or {}),
         )
 

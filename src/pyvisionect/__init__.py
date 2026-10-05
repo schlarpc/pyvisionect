@@ -61,6 +61,8 @@ from .packets import (
 )
 from .session import (
     PENDING_ORDER,
+    FileRead,
+    SyncStatus,
     ConnectionConfig,
     DeviceConnected,
     DeviceConnection,
@@ -93,6 +95,7 @@ __all__ = [
     "DeviceStateStore",
     "Direction",
     "Event",
+    "FileRead",
     "Frame",
     "FrameDecoder",
     "ImagePacket",
@@ -108,6 +111,7 @@ __all__ = [
     "Rectangle",
     "StatusPacket",
     "StatusReceived",
+    "SyncStatus",
     "TCLV",
     "VisionectError",
     "__version__",

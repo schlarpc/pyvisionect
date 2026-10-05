@@ -10,7 +10,16 @@ from .connection import (
     DeviceConnection,
 )
 from .connection import SLEEP_MIN_MINUTES
-from .device import RECTANGLE_UNSUPPORTED_HARDWARE, DeviceState, DeviceStateStore
+from .device import (
+    CONVERGENCE_CONTACTS,
+    DEFAULT_CONTACT_INTERVAL,
+    DRAW_ALLOWANCE,
+    RECTANGLE_UNSUPPORTED_HARDWARE,
+    DeviceState,
+    DeviceStateStore,
+    SyncStatus,
+)
+from .filetransfer import FileRead, FileReadState
 from .pending import (
     PENDING_ORDER,
     SLOT_FLASH_SAVE,
@@ -44,6 +53,12 @@ from .events import (
 
 __all__ = [
     "Acked",
+    "CONVERGENCE_CONTACTS",
+    "DEFAULT_CONTACT_INTERVAL",
+    "DRAW_ALLOWANCE",
+    "FileRead",
+    "FileReadState",
+    "SyncStatus",
     "ButtonReceived",
     "CborReceived",
     "ConnectionConfig",

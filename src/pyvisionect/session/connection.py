@@ -633,6 +633,7 @@ class DeviceConnection:
         options: int = 0,
         force_full: bool = False,
         checksum_override: int | None = None,
+        now: float | None = None,
     ) -> int:
         """Queue an image push from an :class:`~pyvisionect.imaging.EncodedFrame`.
 
@@ -676,6 +677,11 @@ class DeviceConnection:
             checksum_override: send this exact ``ImageHeader.Checksum`` instead
                 of the frame's. For replaying a captured push, or for driving
                 the mismatch lever by hand.
+            now: a clock value, recorded against the push so that
+                :meth:`DeviceState.sync_status` can tell "has not answered
+                yet" from "is showing the wrong thing". Optional, like
+                everywhere else in this library; without it the verdict falls
+                back to counting the device's contacts, which needs no clock.
         """
         if force_full and checksum_override is not None:
             raise ValueError(
@@ -703,10 +709,15 @@ class DeviceConnection:
         return self.send_image_packet(
             ImagePacket(checksum=checksum, rectangles=rects, options=options),
             imaging_state=getattr(frame, "state", None),
+            now=now,
         )
 
     def send_image_packet(
-        self, packet: ImagePacket, *, imaging_state: Any = None
+        self,
+        packet: ImagePacket,
+        *,
+        imaging_state: Any = None,
+        now: float | None = None,
     ) -> int:
         """Queue an already-built :class:`~pyvisionect.packets.ImagePacket`."""
         pid = self.send(
@@ -715,7 +726,7 @@ class DeviceConnection:
             description=f"image push ({len(packet.rectangles)} rects)",
         )
         if self._state is not None:
-            self._state.pushed_checksum = packet.checksum
+            self._state.note_push(packet.checksum, now=now)
             if imaging_state is not None:
                 self._state.imaging_state = imaging_state
         return pid
@@ -777,14 +788,16 @@ class DeviceConnection:
         for slot in work.slots():
             if wanted is not None and slot not in wanted:
                 continue
-            packet_id = self._apply_slot(slot, work)
+            packet_id = self._apply_slot(slot, work, now=now)
             if packet_id is None:
                 continue
             sent[slot] = packet_id
             work.note_sent(slot, packet_id, now=now)
         return sent
 
-    def _apply_slot(self, slot: str, work: PendingWork) -> int | None:
+    def _apply_slot(
+        self, slot: str, work: PendingWork, *, now: float | None = None
+    ) -> int | None:
         if slot == SLOT_PARAM_READS:
             return self.read_params(sorted(work.param_reads))
         if slot == SLOT_PARAM_WRITES:
@@ -796,13 +809,17 @@ class DeviceConnection:
         if slot == "framebuffer_read":
             return self.file_list()
         if slot == SLOT_IMAGE:
-            return self.send_image(work.frame, force_full=work.force_push)
+            return self.send_image(work.frame, force_full=work.force_push, now=now)
         if slot == SLOT_GHOST_CLEAR:
             # An inverse / anti-ghosting pass is a second full-screen push of
             # the same content; the caller supplies the inverse-encoded frame by
             # re-encoding with inverse=True. With only the normal frame in hand
             # the honest thing is to repeat it with the checksum lever set.
-            return self.send_image(work.frame, force_full=True) if work.frame else None
+            return (
+                self.send_image(work.frame, force_full=True, now=now)
+                if work.frame
+                else None
+            )
         if slot == SLOT_SLEEP:
             assert work.sleep_minutes is not None
             return self.sleep(work.sleep_minutes)
