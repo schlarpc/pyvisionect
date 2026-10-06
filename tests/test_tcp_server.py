@@ -556,3 +556,53 @@ def test_server_ssl_context_is_tls_13_only_and_asks_for_no_client_cert() -> None
     context = server_ssl_context(str(CERT), str(KEY))
     assert context.minimum_version is ssl.TLSVersion.TLSv1_3
     assert context.verify_mode is ssl.CERT_NONE
+
+
+def test_a_connection_that_never_identifies_is_closed() -> None:
+    """A device that completes the handshake and says nothing is a zombie.
+
+    Seen twice on real hardware after a Home Assistant restart: ``segs_in: 2``,
+    no data for minutes, the sign believing it was connected while the server
+    reported it absent. The read loop had nothing to wake it, so the socket sat
+    there forever. Closing our end makes the device re-dial.
+    """
+
+    async def scenario() -> None:
+        store = DeviceStateStore()
+        server, port, _ = await _serve(store=store, identify_timeout=0.3)
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            # connect, then say nothing at all; the server should hang up
+            assert await asyncio.wait_for(reader.read(1), timeout=3.0) == b""
+            assert server.stats.unidentified_timeouts == 1
+            assert server.stats.identified == 0
+            writer.close()
+        finally:
+            await server.close()
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=10.0))
+
+
+def test_an_identified_device_may_go_quiet_without_being_closed() -> None:
+    """The watchdog must not fire once a sign has introduced itself.
+
+    A mains-powered sign holds its socket open and heartbeats once a minute, so
+    a short silence after identification is normal, not a fault.
+    """
+
+    async def scenario() -> None:
+        store = DeviceStateStore()
+        server, port, _ = await _serve(store=store, identify_timeout=0.3)
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.write(status_frame())
+            await writer.drain()
+            await asyncio.wait_for(reader.read(4096), timeout=2.0)  # the ack
+            await asyncio.sleep(0.6)  # twice the identify timeout
+            assert server.stats.unidentified_timeouts == 0
+            assert server.connection_for(UUID) is not None
+            writer.close()
+        finally:
+            await server.close()
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=10.0))

@@ -176,6 +176,17 @@ class ServerStats:
     rejected: int = 0
     """Connections closed on a protocol violation."""
 
+    unidentified_timeouts: int = 0
+    """Connections closed because they never identified.
+
+    A device that completes the TCP handshake and then sends nothing holds the
+    socket open forever, because the read loop has nothing to wake it. Observed
+    twice after a Home Assistant restart: ``segs_in: 2`` -- the handshake and
+    nothing else -- for minutes, while the sign believed it was connected and
+    the integration reported it absent. Closing our end makes the device
+    re-dial, which clears it.
+    """
+
     tls_accepted: int = 0
     """Connections whose TLS handshake completed."""
 
@@ -357,6 +368,12 @@ class VisionectServer:
         certfile / keyfile: a shorthand for
             ``ssl_context=server_ssl_context(certfile, keyfile)``. Mutually
             exclusive with *ssl_context*.
+        identify_timeout: close a connection that has sent nothing at all
+            after this many seconds, so the device re-dials. ``None``
+            disables it. Only applies *before* a device identifies: once it
+            has, it may hold the socket quiet between heartbeats. The default
+            is generous -- a real sign sends its first status within a second
+            of connecting.
         clock: seconds-valued monotonic clock. Injectable for tests; this is the
             **only** place the library reads a clock.
 
@@ -381,6 +398,7 @@ class VisionectServer:
         certfile: str | None = None,
         keyfile: str | None = None,
         clock: Callable[[], float] = time.monotonic,
+        identify_timeout: float | None = 120.0,
     ) -> None:
         self.on_events = on_events
         self.store = store if store is not None else DeviceStateStore()
@@ -392,6 +410,7 @@ class VisionectServer:
         if ssl_context is None and certfile is not None:
             ssl_context = server_ssl_context(certfile, keyfile)
         self.ssl_context = ssl_context
+        self.identify_timeout = identify_timeout
         self.clock = clock
         self.stats = ServerStats()
         self._server: asyncio.AbstractServer | None = None
@@ -513,7 +532,28 @@ class VisionectServer:
 
         # The sniff, before anything else and before the timers start: this is
         # the only point at which the connection's protocol is still undecided.
-        head = await self._peek(reader)
+        #
+        # Bounded, because this is where a zombie connection actually hangs: a
+        # device that completes the handshake and sends nothing never reaches
+        # the read loop at all, so a guard further down would never run.
+        try:
+            head = (
+                await asyncio.wait_for(self._peek(reader), self.identify_timeout)
+                if self.identify_timeout
+                else await self._peek(reader)
+            )
+        except asyncio.TimeoutError:
+            self.stats.unidentified_timeouts += 1
+            log.warning(
+                "closing %s: connected but sent nothing in %.0fs, so it cannot "
+                "be identified. Closing makes the device re-dial.",
+                peer,
+                self.identify_timeout,
+            )
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+            return
         if looks_like_client_hello(head):
             if self.ssl_context is None:
                 self.stats.tls_unsupported += 1
@@ -556,6 +596,24 @@ class VisionectServer:
             while not conn.closed:
                 if head:
                     data, head = head, b""
+                elif registered is None and self.identify_timeout:
+                    # Only while unidentified: a device that has introduced
+                    # itself may legitimately hold the socket quiet between
+                    # heartbeats, but one that has said nothing at all is a
+                    # zombie and will never speak.
+                    try:
+                        data = await asyncio.wait_for(
+                            reader.read(READ_CHUNK), self.identify_timeout
+                        )
+                    except asyncio.TimeoutError:
+                        self.stats.unidentified_timeouts += 1
+                        log.warning(
+                            "closing %s: connected but sent nothing in %.0fs, so it "
+                            "cannot be identified. Closing makes the device re-dial.",
+                            peer,
+                            self.identify_timeout,
+                        )
+                        break
                 else:
                     data = await reader.read(READ_CHUNK)
                 if not data:
