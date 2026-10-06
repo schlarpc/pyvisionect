@@ -33,10 +33,30 @@ pip install 'pyvisionect[usb]'          # + pyserial, for USB provisioning
 pip install 'pyvisionect[test]'         # + pytest and dpkt, to run the test suite
 ```
 
-Runtime dependencies are deliberately tiny: `lz4` (the block codec the wire
+Runtime dependencies are deliberately tiny: `cramjam` (the block codec the wire
 uses) and `xxhash` (the display-state checksum). Keep `xxhash` installed even
 though the imaging module has a pure-Python fallback — the native one is roughly
 nine times faster per frame.
+
+
+### Which LZ4 binding
+
+`cramjam` is the dependency rather than `python-lz4`, for one practical reason:
+**`lz4` publishes no musllinux wheels**, so it cannot install in Home
+Assistant's official Alpine container — which is exactly where this library is
+meant to run. `cramjam` ships musllinux wheels and is verified working there.
+
+Both produce **identical wire bytes**. They differ only in Python-side
+convention: `cramjam.lz4.compress_block()` prepends a 4-byte little-endian
+uncompressed size that is *not* part of a raw LZ4 block, and
+`pyvisionect.wire.blocks` strips it. Either backend reads the other's output;
+there are tests pinning that in both directions.
+
+`python-lz4` is still supported as a fast path if it happens to be installed
+(`pip install 'pyvisionect[lz4]'`), and `codec_name()` reports which is in use.
+Neither is required if you pass `ConnectionConfig(compressor=STORED_ONLY)` —
+the device never compresses, so a pure server needs no codec for inbound
+traffic at all.
 
 ## You are the server
 
@@ -726,7 +746,7 @@ library can send them anyway — see "Screen-space partial updates" above.)
 ConnectionConfig(compressor=STORED_ONLY)   # every block Stored=1
 ```
 
-`lz4` is imported lazily and is only needed to compress outbound frames (the
+The LZ4 codec is imported lazily and is only needed to compress outbound frames (the
 default) or to inflate an inbound compressed one — which a device never sends:
 every device→server frame in the capture carries `Compression = 0`.
 `STORED_ONLY` keeps the ordinary block-chain framing and marks every block

@@ -31,11 +31,16 @@ classifiers = [
 # xxhash is NOT optional in practice: imaging has a pure-Python XXH32 fallback,
 # but it is ~9x slower per frame (358 ms vs 39 ms on the 32" canvas).
 dependencies = [
-    "lz4>=4.0",
+    # cramjam, not lz4: it is the only LZ4 binding that publishes musllinux
+    # wheels, so it is the one that installs in Home Assistant's official
+    # Alpine container. Both produce identical wire bytes; see wire/blocks.py.
+    "cramjam>=2.13",
     "xxhash>=3.0",
 ]
 
 [project.optional-dependencies]
+# python-lz4, if you would rather use the C binding where a wheel exists.
+lz4 = ["lz4>=4.0"]
 imaging = ["numpy>=1.24", "pillow>=10.0"]
 usb = ["pyserial>=3.5"]
 test = ["pytest>=7.0", "dpkt>=1.9"]

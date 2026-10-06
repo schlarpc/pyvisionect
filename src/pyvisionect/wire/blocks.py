@@ -48,6 +48,7 @@ __all__ = [
     "BlockHeader",
     "decode_blocks",
     "encode_blocks",
+    "codec_name",
     "have_lz4",
     "iter_block_headers",
     "lz4_compress_block",
@@ -65,36 +66,81 @@ MAX_TOTAL = 0x3200000
 _BLOCK = struct.Struct("<6I")
 
 
-def _lz4_block():
-    """Import ``lz4.block`` on demand.
+_BACKEND: tuple[str, object, object] | None = None
 
-    ``lz4`` is imported lazily so that a deployment which neither compresses
-    outbound frames (``ConnectionConfig(compressor=STORED_ONLY)``) nor ever
-    receives a compressed one can run without the C extension.  That is a real
-    configuration: every device->server frame in the capture carries
-    ``Compression = 0``, so a pure server only needs LZ4 for its own outbound
-    traffic.
+
+def _load_backend():
+    """Resolve an LZ4 block codec, preferring ``cramjam``.
+
+    Two implementations are accepted and they produce the *same wire bytes*;
+    they differ only in Python-side convention, which this function hides:
+
+    * ``cramjam`` -- Rust, and the **only** one that publishes musllinux
+      wheels, so it is the one that installs in Home Assistant's Alpine
+      container. Its ``compress_block`` prepends a 4-byte little-endian
+      uncompressed size, which is *not* part of a raw block and is stripped
+      here. Its ``decompress_block`` wants that length as ``output_len``.
+    * ``lz4`` (python-lz4) -- the C binding, kept as a fast path when it is
+      already installed. ``store_size=False`` is the raw form.
+
+    Imported lazily so a deployment that neither compresses outbound frames
+    (``ConnectionConfig(compressor=STORED_ONLY)``) nor receives a compressed
+    one can run with neither installed. That is a real configuration: every
+    device->server frame in the capture carries ``Compression = 0``, so a pure
+    server needs a codec only for its own outbound traffic.
     """
+    global _BACKEND
+    if _BACKEND is not None:
+        return _BACKEND
     try:
-        import lz4.block as module
-    except ImportError as exc:  # pragma: no cover - depends on the install
-        raise MissingLz4(
-            "this frame needs the lz4 codec but the 'lz4' package is not "
-            "installed. Either install it (pip install lz4) or, if you only "
-            "act as a server, pass ConnectionConfig(compressor=STORED_ONLY) "
-            "to emit every block uncompressed -- the device never compresses, "
-            "so inbound frames need no codec at all."
-        ) from exc
-    return module
+        import cramjam
+
+        def _c(plain: bytes) -> bytes:
+            # strip the 4-byte LE size cramjam prepends; the wire wants a bare block
+            return bytes(cramjam.lz4.compress_block(plain))[4:]
+
+        def _d(payload: bytes, n: int) -> bytes:
+            return bytes(cramjam.lz4.decompress_block(payload, output_len=n))
+
+        _BACKEND = ("cramjam", _c, _d)
+        return _BACKEND
+    except ImportError:
+        pass
+    try:
+        import lz4.block as _m
+
+        def _c(plain: bytes) -> bytes:
+            return _m.compress(plain, store_size=False)
+
+        def _d(payload: bytes, n: int) -> bytes:
+            return _m.decompress(payload, uncompressed_size=n)
+
+        _BACKEND = ("lz4", _c, _d)
+        return _BACKEND
+    except ImportError:
+        pass
+    raise MissingLz4(
+        "this frame needs an LZ4 block codec and neither 'cramjam' nor 'lz4' "
+        "is installed. Install one (pip install cramjam -- it is the one with "
+        "musllinux wheels, so it works in the official Home Assistant "
+        "container) or, if you only act as a server, pass "
+        "ConnectionConfig(compressor=STORED_ONLY) to emit every block "
+        "uncompressed -- the device never compresses, so inbound frames need "
+        "no codec at all."
+    )
+
+
+def codec_name() -> str | None:
+    """Which LZ4 backend is in use, or ``None`` if neither is installed."""
+    try:
+        return _load_backend()[0]
+    except MissingLz4:
+        return None
 
 
 def have_lz4() -> bool:
-    """Whether the ``lz4`` codec is importable."""
-    try:
-        import lz4.block  # noqa: F401
-    except ImportError:
-        return False
-    return True
+    """Whether an LZ4 block codec is importable (either backend)."""
+    return codec_name() is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,10 +186,10 @@ class BlockHeader:
 def lz4_decompress_block(payload: bytes, uncompressed_length: int) -> bytes:
     """Inflate a raw LZ4 block to exactly *uncompressed_length* bytes."""
     try:
-        out = _lz4_block().decompress(payload, uncompressed_size=uncompressed_length)
+        out = _load_backend()[2](payload, uncompressed_length)
     except MissingLz4:
         raise
-    except Exception as exc:  # lz4 raises bare LZ4BlockError
+    except Exception as exc:  # both backends raise their own bare errors
         raise BlockError(f"raw LZ4 block did not inflate: {exc}") from exc
     if len(out) != uncompressed_length:
         raise BlockError(
@@ -160,7 +206,7 @@ def lz4_compress_block(plain: bytes) -> bytes:
     device, so interoperability is unaffected; only byte-identical replay of a
     captured server frame is.
     """
-    return _lz4_block().compress(plain, store_size=False)
+    return _load_backend()[1](plain)
 
 
 def stored_only(plain: bytes) -> bytes:

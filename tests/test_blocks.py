@@ -139,3 +139,49 @@ def test_bad_lz4_payload_reported_clearly() -> None:
     body = struct.pack("<6I", 0, 0, 4, 4800, 0, 0) + b"\xff\xff\xff\xff"
     with pytest.raises(BlockError):
         decode_blocks(body)
+
+
+# --- LZ4 backend ----------------------------------------------------------
+# cramjam and python-lz4 produce the same wire bytes but differ in Python-side
+# convention: cramjam prepends a 4-byte LE uncompressed size that is NOT part
+# of a raw block. Mixing that up ships malformed blocks that look fine locally,
+# so it is pinned here in both directions.
+
+
+def test_the_codec_backend_resolves_and_names_itself() -> None:
+    from pyvisionect.wire.blocks import codec_name, have_lz4
+
+    assert have_lz4() is True
+    assert codec_name() in {"cramjam", "lz4"}
+
+
+@pytest.mark.parametrize("size", [1, 15, 16, 4800, 65536])
+def test_a_block_round_trips_through_whichever_backend_is_installed(size: int) -> None:
+    from pyvisionect.wire.blocks import lz4_compress_block, lz4_decompress_block
+
+    plain = (b"visionect " * ((size // 10) + 1))[:size]
+    assert lz4_decompress_block(lz4_compress_block(plain), size) == plain
+
+
+def test_cramjam_and_python_lz4_agree_on_the_wire_bytes() -> None:
+    """Either backend must read the other's output, or we cannot change default."""
+    cramjam = pytest.importorskip("cramjam")
+    lz4_block = pytest.importorskip("lz4.block")
+
+    plain = (b"visionect frame payload " * 200) + bytes(range(256))
+    prefixed = bytes(cramjam.lz4.compress_block(plain))
+    # the prefix really is the uncompressed length, little-endian
+    assert prefixed[:4] == len(plain).to_bytes(4, "little")
+    raw_from_cramjam = prefixed[4:]
+    raw_from_lz4 = lz4_block.compress(plain, store_size=False)
+
+    assert lz4_block.decompress(raw_from_cramjam, uncompressed_size=len(plain)) == plain
+    assert bytes(cramjam.lz4.decompress_block(raw_from_lz4, output_len=len(plain))) == plain
+
+
+def test_a_truncated_block_is_a_BlockError_not_a_backend_error() -> None:
+    from pyvisionect.wire.blocks import BlockError, lz4_compress_block, lz4_decompress_block
+
+    payload = lz4_compress_block(b"x" * 4800)
+    with pytest.raises(BlockError):
+        lz4_decompress_block(payload[: len(payload) // 2], 4800)
