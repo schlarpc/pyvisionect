@@ -43,7 +43,9 @@ dependencies = [
 lz4 = ["lz4>=4.0"]
 imaging = ["numpy>=1.24", "pillow>=10.0"]
 usb = ["pyserial>=3.5"]
-test = ["pytest>=7.0", "dpkt>=1.9"]
+# lz4 is here so CI exercises both backends and the cross-backend test
+# actually runs; the library itself does not require it.
+test = ["pytest>=7.0", "dpkt>=1.9", "lz4>=4.0"]
 
 [project.scripts]
 pyvisionect-usb = "pyvisionect.io.usb.cli:main"

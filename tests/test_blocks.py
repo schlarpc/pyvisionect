@@ -5,7 +5,6 @@ from __future__ import annotations
 import random
 import struct
 
-import lz4.block
 import pytest
 
 from pyvisionect.wire import (
@@ -95,13 +94,16 @@ def test_round_trip_property() -> None:
 
 
 def test_raw_lz4_block_not_frame_format() -> None:
+    lz4_block = pytest.importorskip(
+        "lz4.block", reason="cross-checks our block against the C binding"
+    )
     """The payload must be a raw block: no frame magic, no size prefix."""
     plain = b"abcd" * 1200
     body = encode_blocks(plain)
     header = BlockHeader.unpack_from(body)
     payload = body[24 : 24 + header.payload_length]
     assert not payload.startswith(b"\x04\x22\x4d\x18")  # LZ4 frame magic
-    assert lz4.block.decompress(payload, uncompressed_size=4800) == plain
+    assert lz4_block.decompress(payload, uncompressed_size=4800) == plain
 
 
 def test_short_header_rejected() -> None:
