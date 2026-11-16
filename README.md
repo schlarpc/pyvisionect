@@ -890,15 +890,54 @@ Verified by hand on one device — `HardwareNameID 8`, the 31.2" Place&Play 32, 
 there is no vendor behaviour to match and no vendor support if it misbehaves. See
 `OPEN-QUESTIONS.md` A10 and `docs/imaging.md`.
 
+## Firmware updates
+
+Firmware can be relayed through the bootloader on the same TCP port as normal
+traffic. This was measured on a Place & Play 32" (hardware 1.1.0, bootloader
+6.3.3830), with firmware 7.4.4407 and 7.3.4358. The implementation comes from
+Tesserae's updater. Other hardware and bootloader families remain untested.
+
+`pyvisionect.bootloader.BootloaderSession` is sans-io: pass bytes to
+`feed_at(data, now)`, send `drain()`, and call `advance(now)` for timeouts.
+It validates the whole file before accepting a hello, then sends each original
+record only after the preceding acknowledgment. `accept_hello` lets your
+transport reject an unexpected device before sending an offer.
+
+For asyncio, set `VisionectServer(on_bootloader=...)` and call
+`pyvisionect.io.bootloader.run_bootloader` from that callback. The callback gets
+`(reader, writer, first)`, where `first` is the prefix already read by the
+listener. With no callback, bootloader connections close without an offer.
+The driver requires the selected device id and a `Build`; it refuses mismatched
+hardware, display, or a bootloader outside the measured 6.3 family.
+
+`pyvisionect.io.firmware.FirmwareRepository(cache_dir)` lists builds from
+Visionect's repository and caches files. Call `refresh()` and `fetch(build)`
+in a worker thread (`asyncio.to_thread`); `builds()` and `cached_file(build)`
+read only the cache. `compatible(...)` filters the list by hardware revision,
+hardware name id and display id, newest first. Choose the target explicitly.
+The repository uses plain HTTP. The two measured builds have SHA-256 pins;
+other files receive structural validation only.
+
+Install the handler and load the complete file before calling `conn.reboot()`
+and flushing the normal connection. Consume each authorized request once so a
+second bootloader connection cannot start the same transfer. Use `BlockAcked`
+for progress and inspect the returned session's `state` and `error`. `DONE`
+means all records were acknowledged. Confirm `Firmware` and `FirmwareID` in a
+subsequent normal status before reporting the update as installed.
+
+Transfers are never retried automatically. If one stops after sending records,
+the frame may need a power cycle or Visionect's USB Configurator. Firmware
+payloads remain opaque; no firmware binaries or decryption keys are included.
+See [the usage example and wire protocol](docs/bootloader.md).
+
 ## What is deliberately out of scope
 
 - **Link encryption.** `Security != 0` needs a 16-byte session key that the
   vendor's gateway escrows with a Visionect HTTPS service; that key material is
   not in the server image, so a self-hosted deployment is plaintext by
   construction. The decoder raises a clear error and the seam is there.
-- **Firmware and bootloader push.** The payloads are AES-CBC (fixed, fleet-wide IV) under a key that
-  exists only on Visionect's servers. Relaying an opaque blob to a device that
-  will flash it is not something to ship untested.
+- **Bootloader replacement.** Firmware relay is supported, but replacing the
+  bootloader itself has not been measured.
 - **Discovery.** There is none. Give Home Assistant an explicit address.
 - **`packet.Type 12` (CBOR) payloads.** The framing is implemented; the CBOR body
   is not parsed. That channel belongs to the newer "AC"/JS-app device generation
