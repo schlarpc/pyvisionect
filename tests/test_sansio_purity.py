@@ -54,6 +54,7 @@ def pure_modules() -> list[Path]:
     paths: list[Path] = []
     for subpackage in PURE_SUBPACKAGES:
         paths.extend(sorted((PACKAGE_ROOT / subpackage).rglob("*.py")))
+    paths.append(PACKAGE_ROOT / "bootloader.py")
     assert paths, "found no modules to scan -- the layout must have changed"
     return paths
 

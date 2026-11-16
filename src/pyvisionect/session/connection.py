@@ -455,12 +455,9 @@ class DeviceConnection:
         with a 4-byte payload. An earlier revision of this library had the two
         swapped, so this call would have sent ``echo``.
 
-        .. warning:: Never observed on the wire. Worth noting that a reboot
-           *is* observable after the fact: the device reconnects with
-           ``ConnectReason == 1`` (reboot), which
-           :attr:`~pyvisionect.packets.StatusPacket.connect_reason_name`
-           reports. That is the cheapest confirmation available that the command
-           landed.
+        Captured at the start of a bootloader firmware update. The device
+        reconnects with ``ConnectReason == 1`` (reboot), exposed through
+        :attr:`~pyvisionect.packets.StatusPacket.connect_reason_name`.
         """
         return self.send_command(CommandType.REBOOT)
 

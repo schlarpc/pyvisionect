@@ -1,6 +1,8 @@
 """The **only** layer that touches I/O.
 
 * :mod:`pyvisionect.io.tcp` -- an asyncio listener on port 11113.
+* :mod:`pyvisionect.io.bootloader` -- an opt-in asyncio firmware transfer.
+* :mod:`pyvisionect.io.firmware` -- the vendor firmware repository and cache.
 * :mod:`pyvisionect.io.usb` -- a package covering the device's ASCII serial
   console: transport, typed command surface, provisioning flows, discovery.
 

@@ -1,4 +1,4 @@
-"""asyncio TCP listener -- the only networking code in the library.
+"""asyncio TCP listener for normal traffic and opt-in bootloader transfers.
 
 The sign is a **client**: it dials out to TCP 11113 and speaks first.  So the
 server's job is to listen, accept whatever connects, and let the sans-io
@@ -37,6 +37,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
+from ..bootloader import is_bootloader_hello
 from ..packets.file import (
     DEVICE_FILE_READ_CHUNK,
     FILE_LIST_LENGTH,
@@ -58,6 +59,7 @@ __all__ = [
     "ServerStats",
     "VisionectServer",
     "EventHandler",
+    "BootloaderHandler",
     "looks_like_client_hello",
     "server_ssl_context",
 ]
@@ -137,6 +139,9 @@ def server_ssl_context(
     return context
 
 EventHandler = Callable[[DeviceConnection, list[Event]], Awaitable[None] | None]
+BootloaderHandler = Callable[
+    [asyncio.StreamReader, asyncio.StreamWriter, bytes], Awaitable[None]
+]
 
 
 @dataclass
@@ -375,7 +380,12 @@ class VisionectServer:
             is generous -- a real sign sends its first status within a second
             of connecting.
         clock: seconds-valued monotonic clock. Injectable for tests; this is the
-            **only** place the library reads a clock.
+            clock for normal device connections.
+        on_bootloader: optional async callback ``(reader, writer, first)`` for
+            a bootloader connection on the same port. ``first`` is the prefix
+            already read; the callback must consume or pass it on. The writer
+            is closed when the callback returns or raises. Without a callback,
+            bootloader connections are closed without sending an offer.
 
     Example:
         >>> async def main():
@@ -399,6 +409,7 @@ class VisionectServer:
         keyfile: str | None = None,
         clock: Callable[[], float] = time.monotonic,
         identify_timeout: float | None = 120.0,
+        on_bootloader: BootloaderHandler | None = None,
     ) -> None:
         self.on_events = on_events
         self.store = store if store is not None else DeviceStateStore()
@@ -411,6 +422,7 @@ class VisionectServer:
             ssl_context = server_ssl_context(certfile, keyfile)
         self.ssl_context = ssl_context
         self.identify_timeout = identify_timeout
+        self.on_bootloader = on_bootloader
         self.clock = clock
         self.stats = ServerStats()
         self._server: asyncio.AbstractServer | None = None
@@ -553,6 +565,15 @@ class VisionectServer:
             writer.close()
             with contextlib.suppress(Exception):
                 await writer.wait_closed()
+            return
+        if is_bootloader_hello(head):
+            try:
+                if self.on_bootloader is not None:
+                    await self.on_bootloader(reader, writer, head)
+            finally:
+                writer.close()
+                with contextlib.suppress(OSError):
+                    await writer.wait_closed()
             return
         if looks_like_client_hello(head):
             if self.ssl_context is None:
